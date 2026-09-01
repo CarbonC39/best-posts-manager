@@ -41,7 +41,7 @@ Go 单体程序承载本地 API、应用层和嵌入的 Vue SPA；SQLite 保存�
 
 项目仍在设计和快速实现阶段，平台能力以各适配器的实际支持范围为准。
 
-## 本地运行（节点 1）
+## 本地运行（节点 1、2）
 
 需要 Go 1.23+。默认数据目录位于操作系统用户配置目录下的 `best-post-manager`，也可以用 `BPM_DATA_DIR` 指定一个权限受限的本地目录：
 
@@ -58,3 +58,15 @@ BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm history
 ```
 
 Mastodon-compatible Account 只保存 token 环境变量名，不把 token 写入 SQLite；发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。节点 1 使用这一最小方案，后续再接操作系统 keychain。
+
+节点 2 的账号仍只保存环境变量名：Misskey 的 `token_env` 指向 access token，`base_url` 是实例地址；Bluesky 的 `remote_id` 是 handle/identifier，`base_url` 是 PDS 地址，`token_env` 指向 app password。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：
+
+```sh
+export MISSKEY_TOKEN=...
+export BSKY_APP_PASSWORD=...
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm account add <profile-id> misskey misskey-main https://misskey.example MISSKEY_TOKEN
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm account add <profile-id> bluesky bluesky-main https://bsky.social BSKY_APP_PASSWORD name.example
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm import <topic-id> <account-id> "https://bsky.app/profile/name.example/post/abc"
+```
+
+Misskey 保留 MFM 原文并使用官方 API；Bluesky 生成链接/提及 facets 并记录 URI/CID。导入只调用用户主动指定的单帖官方端点，不扫描时间线，也不会因仅标记 URL 而联网。

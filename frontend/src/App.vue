@@ -4,13 +4,14 @@ import { api } from './api'
 import PublicationList from './PublicationList.vue'
 
 type Profile = { id: string; name: string }
-type Account = { id: string; profile_id: string; platform: string; name: string }
+type Account = { id: string; profile_id: string; platform: string; name: string; remote_id: string }
 type Topic = { id: string; profile_id: string; title: string; status: string }
 type Draft = { topic_id: string; text: string; format: string; revision: number }
-type Variant = { id: string; topic_id: string; account_id: string; text: string; status: string; relation: string; visibility: string; spoiler_text: string; outdated: boolean }
+type Variant = { id: string; topic_id: string; account_id: string; text: string; format: string; status: string; relation: string; visibility: string; spoiler_text: string; local_only: boolean; outdated: boolean }
 type Media = { id: string; variant_id: string; filename: string; alt_text: string }
 type ExternalPost = { id: string; platform: string; url: string }
 type Emoji = { shortcode: string; url: string; static_url: string }
+type Capability = { platform: string; format: string; text_max_bytes: number; max_media: number; max_media_bytes: number; visibilities: string[]; supports_cw: boolean; supports_local_only: boolean; custom_emoji: boolean }
 
 const section = ref('topics')
 const profiles = ref<Profile[]>([])
@@ -20,6 +21,7 @@ const variants = ref<Variant[]>([])
 const media = ref<Media[]>([])
 const externalPosts = ref<ExternalPost[]>([])
 const emojis = ref<Emoji[]>([])
+const capabilities = ref<Record<string, Capability>>({})
 const draft = ref<Draft | null>(null)
 const selected = ref<Topic | null>(null)
 const message = ref('')
@@ -30,15 +32,31 @@ const profileName = ref('')
 const accountName = ref('')
 const baseURL = ref('')
 const tokenEnv = ref('')
+const remoteID = ref('')
 const topicTitle = ref('')
 const text = ref('')
 const altText = ref('')
 const externalURL = ref('')
+const externalReference = ref('')
 const externalPlatform = ref('mastodon')
 const externalAccountID = ref('')
+const accountPlatform = ref('mastodon')
+const baseURLPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'Bluesky PDS URL' : '平台实例 URL')
+const tokenEnvPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'app password 环境变量名' : 'token 环境变量名')
 
 const profileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value))
 const profileTopics = computed(() => topics.value.filter((topic) => topic.profile_id === selectedProfileID.value && topic.status === 'active'))
+const selectedCapability = computed(() => capabilities.value[selectedAccountID.value])
+const selectedAccount = computed(() => accounts.value.find((account) => account.id === selectedAccountID.value))
+const canImportOfficially = computed(() => selectedAccount.value?.platform === 'misskey' || selectedAccount.value?.platform === 'bluesky')
+
+function variantCapability(variant: Variant) {
+  return capabilities.value[variant.account_id]
+}
+
+function utf8Bytes(text: string) {
+  return new TextEncoder().encode(text).length
+}
 
 watch(selectedProfileID, () => {
   if (!profileAccounts.value.some((account) => account.id === selectedAccountID.value)) {
@@ -55,6 +73,7 @@ async function load() {
     ;[profiles.value, accounts.value, topics.value] = await Promise.all([
       api<Profile[]>('profiles'), api<Account[]>('accounts'), api<Topic[]>('topics'),
     ])
+    capabilities.value = Object.fromEntries(await Promise.all(accounts.value.map(async (account) => [account.id, await api<Capability>(`accounts/${account.id}/capability`)])))
     if (!selectedProfileID.value && profiles.value[0]) selectedProfileID.value = profiles.value[0].id
     if (!selectedAccountID.value && profileAccounts.value[0]) selectedAccountID.value = profileAccounts.value[0].id
   } catch (error) { showError(error) }
@@ -73,8 +92,8 @@ async function addProfile() {
 async function addAccount() {
   if (!accountName.value.trim() || !selectedProfileID.value) return
   try {
-    await api('accounts', { method: 'POST', body: JSON.stringify({ profile_id: selectedProfileID.value, name: accountName.value, platform: 'mastodon', base_url: baseURL.value, token_env: tokenEnv.value }) })
-    accountName.value = ''; baseURL.value = ''; tokenEnv.value = ''
+    await api('accounts', { method: 'POST', body: JSON.stringify({ profile_id: selectedProfileID.value, name: accountName.value, platform: accountPlatform.value, remote_id: remoteID.value, base_url: baseURL.value, token_env: tokenEnv.value }) })
+    accountName.value = ''; baseURL.value = ''; tokenEnv.value = ''; remoteID.value = ''
     await load()
   } catch (error) { showError(error) }
 }
@@ -150,6 +169,7 @@ async function markExternal() {
     message.value = '已标记站外 URL'
   } catch (error) { showError(error) }
 }
+async function importExternal() { if (!selected.value || !selectedAccountID.value || !externalReference.value.trim()) return; try { const post=await api<ExternalPost>('external-posts/import',{method:'POST',body:JSON.stringify({topic_id:selected.value.id,account_id:selectedAccountID.value,reference:externalReference.value})});externalPosts.value.unshift(post);externalReference.value='';message.value='已通过官方 API 导入快照'} catch(error){showError(error)} }
 
 async function uploadMedia(event: Event) {
   if (!selected.value) return
@@ -187,7 +207,7 @@ onMounted(load)
       <section v-if="section==='topics'">
         <h2>话题</h2><label>Profile <select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select></label>
         <form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button>添加 Profile</button></form>
-        <form @submit.prevent="addAccount"><input v-model="accountName" placeholder="账号名称"><input v-model="baseURL" placeholder="Mastodon 实例 URL"><input v-model="tokenEnv" placeholder="token 环境变量名"><button>添加账号</button></form>
+        <form @submit.prevent="addAccount"><input v-model="accountName" placeholder="账号名称"><select v-model="accountPlatform"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option></select><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier"><input v-model="baseURL" :placeholder="baseURLPlaceholder"><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder"><button>添加账号</button></form>
         <form @submit.prevent="addTopic"><input v-model="topicTitle" placeholder="新话题标题"><button>添加话题</button></form>
         <ul class="rows"><li v-for="topic in profileTopics" :key="topic.id"><button class="link" @click="openTopic(topic)">{{topic.title}}</button><span>{{topic.status}}</span></li></ul>
       </section>
@@ -196,11 +216,12 @@ onMounted(load)
         <div class="actions"><button @click="saveDraft">保存基础稿</button><select v-model="selectedAccountID"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} ({{account.platform}})</option></select><button @click="newVariant">从基础稿生成 Variant</button></div>
         <div class="actions"><select v-model="mediaVariantID"><option value="">通用媒体</option><option v-for="variant in variants" :key="variant.id" :value="variant.id">{{variant.account_id}}</option></select><input v-model="altText" placeholder="图片替代文本"><label class="upload">添加图片<input type="file" accept="image/*" @change="uploadMedia"></label></div>
         <ul v-if="media.length" class="media-list"><li v-for="item in media" :key="item.id"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span>{{item.filename}}</span></li></ul>
-        <button @click="loadEmoji">加载实例 emoji</button><div class="emoji-list"><span v-for="emoji in emojis" :key="emoji.shortcode" class="emoji"><img :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div>
-        <h3>平台版本</h3><small>节点 1 默认按 500 字符、最多 4 张图片校验；实例差异会在发布错误中显示。</small>
-        <ul class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span>{{variant.account_id}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><select v-model="variant.visibility"><option>public</option><option>unlisted</option><option>private</option><option>direct</option></select><input v-model="variant.spoiler_text" placeholder="CW（可选）"><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button @click="publish(variant.id)">发布</button></div></li></ul>
+        <button v-if="selectedCapability?.custom_emoji" @click="loadEmoji">加载实例 emoji</button><div class="emoji-list"><span v-for="emoji in emojis" :key="emoji.shortcode" class="emoji"><img :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div>
+        <h3>平台版本</h3><small>编辑控件由账号适配器能力决定；Misskey 保留原始 MFM，Bluesky 使用纯文本与链接/提及 facets。</small>
+        <ul class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span>{{variant.account_id}} · {{variant.format}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><select v-model="variant.visibility"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="CW（可选）"><label v-if="variantCapability(variant)?.supports_local_only"><input type="checkbox" v-model="variant.local_only">仅本地</label><small v-if="variantCapability(variant)?.format==='mfm'">原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button @click="publish(variant.id)">发布</button></div></li></ul>
         <h3>站外关联</h3>
-        <form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">无账号</option><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form>
+        <form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">无账号</option><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form>
+        <form @submit.prevent="importExternal"><input v-model="externalReference" placeholder="Misskey note ID/URL 或 Bluesky URL/at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button><small v-if="!canImportOfficially">请选择 Misskey 或 Bluesky 账号</small></form>
         <ul class="rows"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}</span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a></li></ul>
       </section>
       <section v-else><h2>发布历史</h2><PublicationList/></section>

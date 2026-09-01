@@ -36,7 +36,7 @@ type Emoji struct {
 	URL       string `json:"url"`
 	StaticURL string `json:"static_url"`
 }
-type Result struct{ ID, URL string }
+type Result struct{ ID, URL, CID string }
 type Capability struct {
 	MaxRunes      int
 	MaxMedia      int

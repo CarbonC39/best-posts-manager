@@ -88,7 +88,7 @@ func TestStoreCoreAndVariantRelations(t *testing.T) {
 	if _, err = s.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "shared.png", MIME: "image/png", Path: mediaPath, Size: 3}); err != nil {
 		t.Fatalf("topic-level media should use a NULL variant reference: %v", err)
 	}
-	if _, err = s.CreatePublication(ctx, Publication{VariantID: v.ID, AccountID: a.ID, Status: "pending"}); err != nil {
+	if _, err = s.CreatePublication(ctx, Publication{VariantID: v.ID, AccountID: a.ID, Status: "pending", RemoteCID: "cid-test"}); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {
@@ -108,7 +108,7 @@ func TestStoreCoreAndVariantRelations(t *testing.T) {
 	if got, e := reopened.ListMedia(ctx, topic.ID); e != nil || len(got) != 2 {
 		t.Fatalf("media did not persist: %d %v", len(got), e)
 	}
-	if got, e := reopened.ListPublications(ctx); e != nil || len(got) != 1 {
+	if got, e := reopened.ListPublications(ctx); e != nil || len(got) != 1 || got[0].RemoteCID != "cid-test" {
 		t.Fatalf("publication history did not persist: %d %v", len(got), e)
 	}
 }
@@ -139,5 +139,53 @@ func TestStoreRejectsCrossTopicReferences(t *testing.T) {
 	}
 	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: t2.ID, AccountID: a1.ID, Platform: "x", URL: "https://x.test/1"}); err == nil {
 		t.Fatal("cross-profile external account must be rejected")
+	}
+}
+
+func TestVariantRulesFollowTargetPlatform(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p, _ := s.CreateProfile(ctx, Profile{Name: "personal"})
+	mastodon, _ := s.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "mastodon", Name: "mastodon"})
+	misskey, _ := s.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "misskey", Name: "misskey"})
+	bluesky, _ := s.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "bluesky", Name: "bluesky", RemoteID: "me.test"})
+	topic, _ := s.CreateTopic(ctx, Topic{ProfileID: p.ID, Title: "rules"})
+	source, err := s.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: mastodon.ID}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Visibility, source.SpoilerText, source.LocalOnly = "private", "cw", true
+	source, err = s.UpdateVariant(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.LocalOnly {
+		t.Fatal("Mastodon must not persist Misskey-only local_only")
+	}
+	mfm, err := s.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: misskey.ID}, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mfm.Format != "mfm" || mfm.Visibility != "public" || mfm.SpoilerText != "cw" {
+		t.Fatalf("Misskey copy was not normalized: %+v", mfm)
+	}
+	mfm.Visibility = "home"
+	if _, err = s.UpdateVariant(ctx, mfm); err != nil {
+		t.Fatalf("Misskey home visibility must be accepted: %v", err)
+	}
+	mfm.Visibility = "specified"
+	if _, err = s.UpdateVariant(ctx, mfm); err == nil {
+		t.Fatal("specified visibility without recipient support must be rejected for Misskey")
+	}
+	bsky, err := s.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: bluesky.ID}, mfm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bsky.Format != "plain" || bsky.Visibility != "public" || bsky.SpoilerText != "" || bsky.LocalOnly {
+		t.Fatalf("Bluesky copy was not normalized: %+v", bsky)
 	}
 }

@@ -52,15 +52,38 @@ CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, profile_id TEXT NOT NU
 CREATE UNIQUE INDEX IF NOT EXISTS accounts_remote_identity ON accounts(profile_id, platform, remote_id) WHERE remote_id <> '';
 CREATE TABLE IF NOT EXISTS topics (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id), title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS base_drafts (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL UNIQUE REFERENCES topics(id) ON DELETE CASCADE, text TEXT NOT NULL DEFAULT '', format TEXT NOT NULL DEFAULT 'plain', language TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS variants (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id), text TEXT NOT NULL DEFAULT '', format TEXT NOT NULL DEFAULT 'plain', status TEXT NOT NULL DEFAULT 'draft', relation TEXT NOT NULL DEFAULT 'detached', source_revision TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'public', spoiler_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS variants (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id), text TEXT NOT NULL DEFAULT '', format TEXT NOT NULL DEFAULT 'plain', status TEXT NOT NULL DEFAULT 'draft', relation TEXT NOT NULL DEFAULT 'detached', source_revision TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'public', spoiler_text TEXT NOT NULL DEFAULT '', local_only INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, variant_id TEXT REFERENCES variants(id) ON DELETE SET NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, alt_text TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS publications (id TEXT PRIMARY KEY, variant_id TEXT NOT NULL REFERENCES variants(id), account_id TEXT NOT NULL REFERENCES accounts(id), status TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', remote_url TEXT NOT NULL DEFAULT '', error_category TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL DEFAULT 'internal', published_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS publications (id TEXT PRIMARY KEY, variant_id TEXT NOT NULL REFERENCES variants(id), account_id TEXT NOT NULL REFERENCES accounts(id), status TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', remote_url TEXT NOT NULL DEFAULT '', remote_cid TEXT NOT NULL DEFAULT '', error_category TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL DEFAULT 'internal', published_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, account_id TEXT REFERENCES accounts(id), platform TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', text_snapshot TEXT NOT NULL DEFAULT '', captured_by TEXT NOT NULL DEFAULT 'manual', created_at TEXT NOT NULL);`)
 	if err != nil {
 		return err
 	}
 	_, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(1)`)
-	return err
+	if err != nil {
+		return err
+	}
+	var version int
+	if err = s.DB.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version); err != nil {
+		return err
+	}
+	if version < 2 {
+		if _, err = s.DB.ExecContext(ctx, `ALTER TABLE variants ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+		if _, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(2)`); err != nil {
+			return err
+		}
+	}
+	if version < 3 {
+		if _, err = s.DB.ExecContext(ctx, `ALTER TABLE publications ADD COLUMN remote_cid TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+		if _, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(3)`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -72,6 +95,12 @@ func id() string {
 	return fmt.Sprintf("%d-%x", time.Now().UnixNano(), b)
 }
 func parseTime(v string) time.Time { t, _ := time.Parse(time.RFC3339Nano, v); return t }
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
 
 func (s *Store) CreateProfile(ctx context.Context, p Profile) (Profile, error) {
 	p.Name = strings.TrimSpace(p.Name)
@@ -114,8 +143,8 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 		return a, ErrNotFound
 	}
 	a.Name = strings.TrimSpace(a.Name)
-	if a.Name == "" || (a.Platform != "mastodon" && a.Platform != "mastodon-compatible") {
-		return a, fmt.Errorf("a name and Mastodon-compatible platform are required")
+	if a.Name == "" || (a.Platform != "mastodon" && a.Platform != "mastodon-compatible" && a.Platform != "misskey" && a.Platform != "bluesky") {
+		return a, fmt.Errorf("a name and supported platform (mastodon, misskey, bluesky) are required")
 	}
 	if a.ID == "" {
 		a.ID = id()
@@ -264,6 +293,10 @@ func (s *Store) CreateVariant(ctx context.Context, v Variant, sourceVariantID st
 	if !s.accountTopicOK(ctx, v.TopicID, v.AccountID) {
 		return v, ErrNotFound
 	}
+	account, e := s.GetAccount(ctx, v.AccountID)
+	if e != nil {
+		return v, e
+	}
 	if v.ID == "" {
 		v.ID = id()
 	}
@@ -279,7 +312,7 @@ func (s *Store) CreateVariant(ctx context.Context, v Variant, sourceVariantID st
 		if source.TopicID != v.TopicID {
 			return v, fmt.Errorf("source variant must belong to the same topic")
 		}
-		v.Text, v.Format, v.Visibility, v.SpoilerText = source.Text, source.Format, source.Visibility, source.SpoilerText
+		v.Text, v.Format, v.Visibility, v.SpoilerText, v.LocalOnly = source.Text, source.Format, source.Visibility, source.SpoilerText, source.LocalOnly
 		v.Relation = "detached"
 	} else {
 		b, e := s.GetBaseDraft(ctx, v.TopicID)
@@ -288,13 +321,16 @@ func (s *Store) CreateVariant(ctx context.Context, v Variant, sourceVariantID st
 		}
 		v.Text, v.Format, v.Relation, v.SourceRevision = b.Text, b.Format, "linked", strconv.Itoa(b.Revision)
 	}
-	_, e := s.DB.ExecContext(ctx, `INSERT INTO variants(id,topic_id,account_id,text,format,status,relation,source_revision,visibility,spoiler_text,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.TopicID, v.AccountID, v.Text, v.Format, v.Status, v.Relation, v.SourceRevision, v.Visibility, v.SpoilerText, v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+	normalizeVariantForPlatform(&v, account.Platform)
+	_, e = s.DB.ExecContext(ctx, `INSERT INTO variants(id,topic_id,account_id,text,format,status,relation,source_revision,visibility,spoiler_text,local_only,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.TopicID, v.AccountID, v.Text, v.Format, v.Status, v.Relation, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
 	return v, e
 }
 func (s *Store) getVariant(ctx context.Context, vid string) (Variant, error) {
 	var v Variant
 	var c, u string
-	e := s.DB.QueryRowContext(ctx, `SELECT id,topic_id,account_id,text,format,status,relation,source_revision,visibility,spoiler_text,created_at,updated_at FROM variants WHERE id=?`, vid).Scan(&v.ID, &v.TopicID, &v.AccountID, &v.Text, &v.Format, &v.Status, &v.Relation, &v.SourceRevision, &v.Visibility, &v.SpoilerText, &c, &u)
+	var local int
+	e := s.DB.QueryRowContext(ctx, `SELECT id,topic_id,account_id,text,format,status,relation,source_revision,visibility,spoiler_text,local_only,created_at,updated_at FROM variants WHERE id=?`, vid).Scan(&v.ID, &v.TopicID, &v.AccountID, &v.Text, &v.Format, &v.Status, &v.Relation, &v.SourceRevision, &v.Visibility, &v.SpoilerText, &local, &c, &u)
+	v.LocalOnly = local != 0
 	if e != nil {
 		if e == sql.ErrNoRows {
 			e = ErrNotFound
@@ -365,31 +401,86 @@ func (s *Store) UpdateVariant(ctx context.Context, v Variant) (Variant, error) {
 	if v.Visibility == "" {
 		v.Visibility = old.Visibility
 	}
-	if v.Visibility != "public" && v.Visibility != "unlisted" && v.Visibility != "private" && v.Visibility != "direct" {
+	account, e := s.GetAccount(ctx, old.AccountID)
+	if e != nil {
+		return v, e
+	}
+	if !validVisibility(account.Platform, v.Visibility) {
 		return v, fmt.Errorf("invalid visibility")
 	}
+	switch account.Platform {
+	case "misskey":
+		v.Format = "mfm"
+	case "bluesky":
+		v.Format, v.SpoilerText, v.LocalOnly = "plain", "", false
+	default:
+		v.Format, v.LocalOnly = "plain", false
+	}
 	stamp := now()
-	_, e = s.DB.ExecContext(ctx, `UPDATE variants SET text=?,format=?,status=?,relation=?,source_revision=?,visibility=?,spoiler_text=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.Status, v.Relation, v.SourceRevision, v.Visibility, v.SpoilerText, stamp, v.ID)
+	_, e = s.DB.ExecContext(ctx, `UPDATE variants SET text=?,format=?,status=?,relation=?,source_revision=?,visibility=?,spoiler_text=?,local_only=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.Status, v.Relation, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), stamp, v.ID)
 	v.TopicID, v.AccountID, v.CreatedAt = old.TopicID, old.AccountID, old.CreatedAt
 	v.UpdatedAt = parseTime(stamp)
 	v.Outdated = false
 	return v, e
+}
+
+func normalizeVariantForPlatform(v *Variant, platform string) {
+	switch platform {
+	case "misskey":
+		v.Format = "mfm"
+		if !validVisibility(platform, v.Visibility) {
+			v.Visibility = "public"
+		}
+	case "bluesky":
+		v.Format, v.Visibility = "plain", "public"
+		v.SpoilerText, v.LocalOnly = "", false
+	default:
+		v.Format = "plain"
+		v.LocalOnly = false
+		if !validVisibility(platform, v.Visibility) {
+			v.Visibility = "public"
+		}
+	}
+}
+
+func validVisibility(platform, visibility string) bool {
+	var allowed []string
+	switch platform {
+	case "misskey":
+		allowed = []string{"public", "home", "followers"}
+	case "bluesky":
+		allowed = []string{"public"}
+	default:
+		allowed = []string{"public", "unlisted", "private", "direct"}
+	}
+	for _, value := range allowed {
+		if visibility == value {
+			return true
+		}
+	}
+	return false
 }
 func (s *Store) ApplyVariantUpdate(ctx context.Context, vid string) (Variant, error) {
 	v, e := s.getVariant(ctx, vid)
 	if e != nil {
 		return v, e
 	}
+	if v.Relation != "linked" {
+		return v, fmt.Errorf("only linked variants can apply base draft updates")
+	}
 	b, e := s.GetBaseDraft(ctx, v.TopicID)
 	if e != nil {
 		return v, e
 	}
 	v.Text, v.Format, v.Relation, v.SourceRevision = b.Text, b.Format, "linked", strconv.Itoa(b.Revision)
+	if account, ae := s.GetAccount(ctx, v.AccountID); ae == nil {
+		normalizeVariantForPlatform(&v, account.Platform)
+	}
 	return s.updateLinked(ctx, v)
 }
 func (s *Store) updateLinked(ctx context.Context, v Variant) (Variant, error) {
 	stamp := now()
-	_, e := s.DB.ExecContext(ctx, `UPDATE variants SET text=?,format=?,relation='linked',source_revision=?,visibility=?,spoiler_text=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.SourceRevision, v.Visibility, v.SpoilerText, stamp, v.ID)
+	_, e := s.DB.ExecContext(ctx, `UPDATE variants SET text=?,format=?,relation='linked',source_revision=?,visibility=?,spoiler_text=?,local_only=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), stamp, v.ID)
 	v.UpdatedAt = parseTime(stamp)
 	v.Outdated = false
 	return v, e
@@ -474,18 +565,18 @@ func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publicati
 	if p.IdempotencyKey == "" {
 		p.IdempotencyKey = p.VariantID + ":" + p.AccountID + ":" + p.CreatedAt.Format(time.RFC3339Nano)
 	}
-	_, e := s.DB.ExecContext(ctx, `INSERT INTO publications(id,variant_id,account_id,status,remote_id,remote_url,error_category,error_message,idempotency_key,source,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.VariantID, p.AccountID, p.Status, p.RemoteID, p.RemoteURL, p.ErrorCategory, p.ErrorMessage, p.IdempotencyKey, p.Source, "", p.CreatedAt.Format(time.RFC3339Nano))
+	_, e := s.DB.ExecContext(ctx, `INSERT INTO publications(id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.VariantID, p.AccountID, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, p.IdempotencyKey, p.Source, "", p.CreatedAt.Format(time.RFC3339Nano))
 	return p, e
 }
 func (s *Store) UpdatePublication(ctx context.Context, p Publication) error {
-	_, e := s.DB.ExecContext(ctx, `UPDATE publications SET status=?,remote_id=?,remote_url=?,error_category=?,error_message=?,published_at=? WHERE id=?`, p.Status, p.RemoteID, p.RemoteURL, p.ErrorCategory, p.ErrorMessage, formatTime(p.PublishedAt), p.ID)
+	_, e := s.DB.ExecContext(ctx, `UPDATE publications SET status=?,remote_id=?,remote_url=?,remote_cid=?,error_category=?,error_message=?,published_at=? WHERE id=?`, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, formatTime(p.PublishedAt), p.ID)
 	return e
 }
 
 func (s *Store) GetPublication(ctx context.Context, pid string) (Publication, error) {
 	var p Publication
 	var published, created string
-	err := s.DB.QueryRowContext(ctx, `SELECT id,variant_id,account_id,status,remote_id,remote_url,error_category,error_message,idempotency_key,source,published_at,created_at FROM publications WHERE id=?`, pid).Scan(&p.ID, &p.VariantID, &p.AccountID, &p.Status, &p.RemoteID, &p.RemoteURL, &p.ErrorCategory, &p.ErrorMessage, &p.IdempotencyKey, &p.Source, &published, &created)
+	err := s.DB.QueryRowContext(ctx, `SELECT id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at FROM publications WHERE id=?`, pid).Scan(&p.ID, &p.VariantID, &p.AccountID, &p.Status, &p.RemoteID, &p.RemoteURL, &p.RemoteCID, &p.ErrorCategory, &p.ErrorMessage, &p.IdempotencyKey, &p.Source, &published, &created)
 	if err == sql.ErrNoRows {
 		err = ErrNotFound
 	}
@@ -500,7 +591,7 @@ func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 func (s *Store) ListPublications(ctx context.Context) ([]Publication, error) {
-	rows, e := s.DB.QueryContext(ctx, `SELECT id,variant_id,account_id,status,remote_id,remote_url,error_category,error_message,idempotency_key,source,published_at,created_at FROM publications ORDER BY created_at DESC`)
+	rows, e := s.DB.QueryContext(ctx, `SELECT id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at FROM publications ORDER BY created_at DESC`)
 	if e != nil {
 		return nil, e
 	}
@@ -509,7 +600,7 @@ func (s *Store) ListPublications(ctx context.Context) ([]Publication, error) {
 	for rows.Next() {
 		var p Publication
 		var pub, c string
-		if e = rows.Scan(&p.ID, &p.VariantID, &p.AccountID, &p.Status, &p.RemoteID, &p.RemoteURL, &p.ErrorCategory, &p.ErrorMessage, &p.IdempotencyKey, &p.Source, &pub, &c); e != nil {
+		if e = rows.Scan(&p.ID, &p.VariantID, &p.AccountID, &p.Status, &p.RemoteID, &p.RemoteURL, &p.RemoteCID, &p.ErrorCategory, &p.ErrorMessage, &p.IdempotencyKey, &p.Source, &pub, &c); e != nil {
 			return nil, e
 		}
 		p.PublishedAt = parseTime(pub)

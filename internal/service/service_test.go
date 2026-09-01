@@ -47,6 +47,32 @@ func TestPublishApplicationFlow(t *testing.T) {
 	}
 }
 
+func TestImportRejectsCrossProfileBeforeRemoteRequest(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+	t.Setenv("MISSKEY_IMPORT_TOKEN", "secret")
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p1, _ := st.CreateProfile(ctx, app.Profile{Name: "one"})
+	p2, _ := st.CreateProfile(ctx, app.Profile{Name: "two"})
+	a, _ := st.CreateAccount(ctx, app.Account{ProfileID: p1.ID, Platform: "misskey", Name: "mk", BaseURL: ts.URL, TokenEnv: "MISSKEY_IMPORT_TOKEN"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p2.ID, Title: "other"})
+	if _, err = New(st).ImportExternal(ctx, topic.ID, a.ID, "note1"); err == nil {
+		t.Fatal("cross-profile import must fail")
+	}
+	if called {
+		t.Fatal("cross-profile import must not call a remote API")
+	}
+}
+
 func TestPublishNetworkFailureNeedsConfirmation(t *testing.T) {
 	t.Setenv("BPM_TEST_TOKEN", "secret")
 	ctx := context.Background()
@@ -138,6 +164,36 @@ func TestRetryReusesPublicationAndIdempotencyKey(t *testing.T) {
 	}
 	if retried.ID != failed.ID || retried.Status != "published" || len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
 		t.Fatalf("retry did not preserve identity/key: failed=%+v retried=%+v keys=%v", failed, retried, keys)
+	}
+}
+
+func TestOfficialImportDispatchesWithoutWebScrapeFallback(t *testing.T) {
+	t.Setenv("MISSKEY_TOKEN", "secret")
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/api/notes/show" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "n1", "text": "MFM snapshot"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	a, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "misskey", Name: "m", BaseURL: ts.URL, TokenEnv: "MISSKEY_TOKEN"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p.ID, Title: "t"})
+	post, err := New(st).ImportExternal(ctx, topic.ID, a.ID, ts.URL+"/notes/n1")
+	if err != nil || post.CapturedBy != "official_api" || post.TextSnapshot != "MFM snapshot" {
+		t.Fatalf("official import failed: %+v %v", post, err)
+	}
+	if len(paths) != 1 || paths[0] != "/api/notes/show" {
+		t.Fatalf("import must only call official single-note endpoint: %v", paths)
 	}
 }
 

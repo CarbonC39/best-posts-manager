@@ -74,12 +74,18 @@ func main() {
 		printResult(p, e)
 	case "external":
 		external(ctx, store, os.Args[2:])
+	case "import":
+		if len(os.Args) < 5 {
+			fatal(fmt.Errorf("import requires topic-id account-id reference"))
+		}
+		post, e := svc.ImportExternal(ctx, os.Args[2], os.Args[3], os.Args[4])
+		printResult(post, e)
 	default:
 		usage()
 	}
 }
 func usage() {
-	fmt.Println("bpm serve [-addr 127.0.0.1:8787]\nbpm profile add <name> | list\nbpm account add <profile-id> <platform> <name> <base-url> [token-env] | list [profile-id]\nbpm topic add <profile-id> <title> | list [profile-id]\nbpm draft show|set <topic-id> [text]\nbpm variant add|show|edit|apply|list ...\nbpm media add|list <topic-id> [file] [variant-id]\nbpm publish <variant-id> | retry <publication-id>\nbpm history\nbpm external mark|list <topic-id> <platform> <url> [remote-id]")
+	fmt.Println("bpm serve [-addr 127.0.0.1:8787]\nbpm profile add <name> | list\nbpm account add <profile-id> <platform> <name> <base-url> [token-env] [remote-id] | list [profile-id]\nbpm topic add <profile-id> <title> | list [profile-id]\nbpm draft show|set <topic-id> [text]\nbpm variant add|show|edit|apply|list ...\nbpm media add|list <topic-id> [file] [variant-id]\nbpm publish <variant-id> | retry <publication-id>\nbpm history\nbpm import <topic-id> <account-id> <URL-or-remote-id>\nbpm external mark|list <topic-id> <platform> <url> [remote-id]")
 }
 func serve(svc *service.Service, args []string) {
 	f := flag.NewFlagSet("serve", flag.ExitOnError)
@@ -109,6 +115,9 @@ func account(ctx context.Context, s *app.Store, args []string) {
 		a := app.Account{ProfileID: args[1], Platform: args[2], Name: args[3], BaseURL: args[4]}
 		if len(args) > 5 {
 			a.TokenEnv = args[5]
+		}
+		if len(args) > 6 {
+			a.RemoteID = args[6]
 		}
 		v, e := s.CreateAccount(ctx, a)
 		printResult(v, e)

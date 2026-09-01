@@ -68,13 +68,14 @@ Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能�
 ### Fediverse
 
 - **Mastodon-compatible**：使用实例提供的标准 API，配置实例 URL、令牌、可见性、内容警告和媒体上传；首节点在账号设置或用户主动刷新时获取实例 custom emoji，按实例 URL 缓存其短代码与图片信息，在预览中渲染；发布仍发送平台原生短代码/规则，缓存不可用时回退为短代码。实例能力差异以运行时错误呈现，不做后台轮询刷新。
-- **Misskey**：使用官方 API，支持 MFM（至少保存原始 MFM，不把 Markdown 假装成 MFM），note 可见性、CW 和自定义 emoji 作为能力/选项处理；保留原生短代码/规则发送。MFM 预览需要明确标记其渲染器，避免误发 HTML。
+- **Misskey**：使用 `{instance}/api` 官方 POST API：图片先走 `drive/files/create`，再用 `notes/create` 发布；支持 MFM（至少保存原始 MFM，不把 Markdown 假装成 MFM）、note 可见性、CW、localOnly 和自定义 emoji。emoji 按实例缓存；新版本 entity 缺少 URL 时按实例 `/emoji/{escaped-name}.webp` 派生。保留原生短代码/规则发送。MFM 预览需要明确标记其渲染器，避免误发 HTML。
+- Misskey 的 `notes/create` 没有可依赖的幂等键；本地 key 只用于记录，不能伪装成远端幂等。最终提交超时或 5xx 进入待确认，不能盲目重试。
 
 两者都只发布用户选定的 Variant，不抓取关注时间线，也不默认扫描账号最近帖子。URL 导入若没有官方可用的单帖查询，则保持 URL 标记模式。
 
 ### Bluesky
 
-使用官方 AT Protocol 客户端/API，处理登录会话、文本 facet、图片 blob 和必要的链接元数据。远端记录 key/URI/CID 等标识，发布前完成字节长度和图片限制校验。首版只做明确的发帖/单帖导入能力，不做时间线同步。
+使用官方 AT Protocol XRPC：`com.atproto.server.createSession` 建立内存会话，`repo.uploadBlob` 上传图片，`repo.createRecord` 创建 `app.bsky.feed.post`；`resolveHandle`/`repo.getRecord` 使用 GET 查询。处理链接/提及的 UTF-8 byteStart/byteEnd facets 和图片 blob。远端记录 key/URI/CID 等标识，发布前完成 3000-byte record 与图片限制校验。`createRecord` 不提供本地可复用的幂等键，最终提交未知时保持待确认。首版只做明确的发帖/单帖导入能力，不做时间线同步。
 
 ## 浏览器桥接
 

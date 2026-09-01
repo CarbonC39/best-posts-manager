@@ -110,3 +110,31 @@ func TestExternalMarkerDoesNotCallRemote(t *testing.T) {
 		t.Fatalf("marker failed: %s", res.Status)
 	}
 }
+
+func TestCapabilityIsSelectedFromAccountPlatform(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	a, err := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "bluesky", Name: "bsky", BaseURL: "https://pds.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(&Server{Svc: service.New(st)})
+	defer server.Close()
+	res, err := http.Get(server.URL + "/api/accounts/" + a.ID + "/capability")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var capability map[string]any
+	if err = json.NewDecoder(res.Body).Decode(&capability); err != nil {
+		t.Fatal(err)
+	}
+	if capability["platform"] != "bluesky" || capability["format"] != "plain" || capability["text_max_bytes"] != float64(3000) {
+		t.Fatalf("unexpected capability: %#v", capability)
+	}
+}

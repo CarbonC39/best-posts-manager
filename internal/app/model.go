@@ -47,6 +47,7 @@ type Variant struct {
 	SourceRevision string    `json:"source_revision"`
 	Visibility     string    `json:"visibility"`
 	SpoilerText    string    `json:"spoiler_text"`
+	LocalOnly      bool      `json:"local_only"`
 	Outdated       bool      `json:"outdated"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -71,6 +72,7 @@ type Publication struct {
 	Status         string    `json:"status"`
 	RemoteID       string    `json:"remote_id"`
 	RemoteURL      string    `json:"remote_url"`
+	RemoteCID      string    `json:"remote_cid"`
 	ErrorCategory  string    `json:"error_category"`
 	ErrorMessage   string    `json:"error_message"`
 	IdempotencyKey string    `json:"idempotency_key"`

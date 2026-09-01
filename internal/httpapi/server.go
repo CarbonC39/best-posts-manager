@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/platform"
 	"best-post-manager/internal/service"
 )
 
@@ -215,6 +216,23 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, v)
 		}
 		return
+	case path == "external-posts/import" && r.Method == http.MethodPost:
+		var req struct {
+			TopicID   string `json:"topic_id"`
+			AccountID string `json:"account_id"`
+			Reference string `json:"reference"`
+		}
+		if e := decode(r, &req); e != nil {
+			fail(w, 400, e)
+			return
+		}
+		v, e := s.Svc.ImportExternal(ctx, req.TopicID, req.AccountID, req.Reference)
+		if e != nil {
+			fail(w, 400, e)
+		} else {
+			writeJSON(w, 201, v)
+		}
+		return
 	case path == "external-posts" && r.Method == http.MethodPost:
 		var v app.ExternalPost
 		if e := decode(r, &v); e != nil {
@@ -241,16 +259,29 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			fail(w, 404, e)
 			return
 		}
-		if a.Platform != "mastodon" && a.Platform != "mastodon-compatible" {
-			fail(w, 400, fmt.Errorf("emoji endpoint only supports Mastodon-compatible"))
+		var v []platform.Emoji
+		if a.Platform == "mastodon" || a.Platform == "mastodon-compatible" {
+			v, e = s.Svc.Mastodon.CustomEmoji(ctx, a)
+		} else if a.Platform == "misskey" {
+			v, e = s.Svc.Misskey.CustomEmoji(ctx, a)
+		} else {
+			fail(w, 400, fmt.Errorf("this platform has no custom emoji endpoint"))
 			return
 		}
-		v, e := s.Svc.Mastodon.CustomEmoji(ctx, a)
 		if e != nil {
 			fail(w, 400, e)
 		} else {
 			writeJSON(w, 200, v)
 		}
+		return
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/capability") && r.Method == http.MethodGet:
+		aid := strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/capability")
+		a, e := s.Svc.Store.GetAccount(ctx, aid)
+		if e != nil {
+			fail(w, 404, e)
+			return
+		}
+		writeJSON(w, 200, platform.CapabilityFor(a.Platform))
 		return
 	case strings.HasPrefix(path, "variants/"):
 		s.variant(w, r, strings.TrimPrefix(path, "variants/"))

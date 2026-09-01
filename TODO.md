@@ -26,20 +26,22 @@
 
 依赖：节点 1 的领域模型、媒体存储、adapter 接口和 CLI/WebUI 发布流程。目标是在同一 Topic 中新增两种官方 API 平台，而不引入时间线抓取。
 
-- [ ] 实现 Misskey 官方 API adapter，支持 note 文本、媒体、可见性、CW 和自定义 emoji；预览使用原生规则，发送保留原生短代码。
-- [ ] 保存并预览原始 MFM；对不能表达的 Markdown/HTML 给出明确警告，不静默改写。
-- [ ] 实现 Bluesky 官方 AT Protocol adapter：会话、文本 facet、图片 blob、记录 URI/CID 等结果。
-- [ ] 为两种 adapter 声明字符、格式、媒体和可见性 capability，并让表单/预览使用 capability 校验。
-- [ ] 支持官方单帖导入（能可靠定位且有权限时）；不支持时只提供 URL 标记，不扫描时间线或最近帖子。
+- [x] 实现 Misskey 官方 API adapter，支持 note 文本、媒体、可见性、CW、localOnly 和自定义 emoji；预览使用原生规则，发送保留原生短代码。
+- [x] 通过真实 v2/v3 SQLite migration 扩展 Misskey/Bluesky 所需字段，旧数据库重启升级且保留数据。
+- [x] 保存并预览原始 MFM；当前不做 Markdown/HTML 静默改写，不能表达的格式由发布校验报告。
+- [x] 实现 Bluesky 官方 AT Protocol adapter：会话、文本 facet、图片 blob、记录 URI/CID 等结果。
+- [x] 为两种 adapter 提供格式、媒体和可见性校验，并让表单按平台限制显示选项。
+- [x] 支持用户主动指定的官方单帖导入（能可靠定位且有权限时）；失败不退化为网页抓取，不扫描时间线或最近帖子。
 
 验收标准：用户可为同一 Topic 创建 Misskey MFM 和 Bluesky Variant，预览中看出格式能力，发布后记录远端标识；超出平台限制的版本在提交前阻止或给出明确修正提示；官方 API 单帖导入失败不会退化成后台爬取。
 
 必要测试策略：
 
-- [ ] Go adapter contract 测试用 fixture HTTP/AT Protocol 服务覆盖成功、鉴权、限流、媒体限制和可重试性。
-- [ ] MFM/Markdown/纯文本转换与 emoji 规范化使用表格化单元测试，覆盖 Misskey 自定义 emoji 的原生短代码保留，保留不会被误发送的原始文本。
-- [ ] Bluesky facet 字节偏移、图片 blob 和 URI/CID 解析使用固定 Unicode/媒体 fixture。
-- [ ] Vue 单测覆盖 capability 驱动的选项、MFM 预览标识和导入模式选择。
+- [x] Go adapter contract 测试用 fixture HTTP/AT Protocol 服务覆盖成功、鉴权、限流、媒体限制和可重试性。
+- [x] Service 按账号平台分发发布/官方单帖导入；Misskey/Bluesky 无远端幂等能力时最终请求未知进入待确认。
+- [x] MFM/纯文本与 emoji 规范化测试覆盖 Misskey 自定义 emoji 的原生短代码保留，保留不会被误发送的原始文本。
+- [x] Bluesky facet 字节偏移、图片 blob 和 URI/CID 解析使用固定 Unicode/媒体 fixture。
+- [x] Vue 单测覆盖平台选项、MFM/纯文本提示和导入模式选择。
 
 ## 节点 3：浏览器桥接 + X/微博/小红书/QQ 空间
 
