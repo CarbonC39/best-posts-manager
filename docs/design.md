@@ -32,14 +32,14 @@ WebUI 与 CLI 都是本地入口。HTTP API 只监听本地回环地址；若未
 - **Account**：某个平台的一个账号连接。一个平台可有多个 Account；保存平台类型、显示名称、远端身份和凭据引用，不把令牌放入正文或日志。
 - **Topic**：一个跨平台话题/创作单元，包含标题、状态和关联的 BaseDraft、Variant、Publication、ExternalPost。
 - **BaseDraft**：与平台无关的主文稿，可含文字、结构化媒体引用、语言和编辑元数据。它是版本生成的来源，不代表已发布内容。
-- **Variant**：Topic 在某个平台/Account 上的实际版本，保存正文格式、平台选项、媒体顺序、语言和来源。Variant 可从 BaseDraft 或其他 Variant 复制后独立修改。
+- **Variant**：Topic 在某个平台/Account 上的实际版本，保存正文格式、平台选项、媒体顺序、语言和来源。首次从 BaseDraft 生成的平台版本为 **linked**，并记录生成时的 BaseDraft revision；从其他 Variant 复制的版本默认是 **detached**。
 - **Publication**：一次对某个 Account 的发布尝试及结果。成功时记录远端 ID/URL 和时间；失败时保留错误类别、可重试性及请求幂等键。
 - **ExternalPost**：用户在本程序外发布的帖子关联。它可以只有 URL/远端 ID，也可以有由浏览器或官方 API 得到的本地内容快照。
 - **Media**：本地媒体元数据（文件、MIME、尺寸、替代文本、校验值）及其在稿件中的顺序。平台上传后的远端媒体 ID 属于对应发布结果，不替代本地源文件。
 
 ### 版本关系与状态
 
-Variant 与 BaseDraft 的关系只表示初始来源，不能阻止后续编辑。用户选择“基于其他版本发送”时应复制内容并记录来源；复制后 Variant 默认是 **detached**，不再被源版本的修改自动覆盖。仍保持来源追踪即可解释差异。
+Variant 与 BaseDraft 的关系遵循一个简单规则：首次生成是 **linked**，记录源 revision；BaseDraft 变化时，系统只把 linked Variant 标记为 `outdated`/“有更新”，绝不静默覆盖平台版本。用户必须主动选择“应用更新”或重新生成，确认后才把当前 BaseDraft 内容应用到该 Variant，并更新其源 revision。用户第一次直接编辑平台 Variant 时自动转为 **detached**（界面应明确提示），之后 BaseDraft 更新不再标记或覆盖它；从其他 Variant 复制也始终是 detached。这样保留来源追踪而不引入实时同步或复杂冲突合并。
 
 建议的 Topic/Variant/Publication 状态足够简单：`draft`、`ready`、`publishing`、`published`、`failed`、`archived`。`publishing` 在程序重启后必须能恢复为可检查状态；失败不能伪装成未尝试。成功发布与外部标记都应显示来源是本程序还是人工关联。
 
@@ -47,7 +47,7 @@ Variant 与 BaseDraft 的关系只表示初始来源，不能阻止后续编辑�
 
 SQLite 表按上述实体拆分，使用稳定的本地 ID、创建/更新时间和必要的外键；正文和平台选项可以先用 JSON 文本存储，但应用层要校验版本化结构。删除采用软删除或明确的级联策略，不能因删除一个 Topic 误删用户媒体。
 
-首阶段 API 只需覆盖：Profile/Account 的增删改查，Topic 与 BaseDraft 编辑，Variant 创建/复制/标记 detached，Media 导入，Publication 预览/发布/重试/标记外部结果，以及 ExternalPost 的 URL 标记和浏览器快照接收。API 应返回能力校验错误和用户可行动的提示；不要暴露任意数据库查询。
+首阶段 API 只需覆盖：Profile/Account 的增删改查，Topic 与 BaseDraft 编辑，Variant 创建/复制、linked 的 source revision/outdated 状态、用户确认的应用更新和 detached 编辑，Media 导入，Publication 预览/发布/重试/标记外部结果，以及 ExternalPost 的 URL 标记和浏览器快照接收。API 应返回能力校验错误和用户可行动的提示；不要暴露任意数据库查询。
 
 ## Profile、账号与凭据
 
@@ -99,7 +99,7 @@ ExternalPost 有两种有意不同的模式：
 
 内容内部保存原始文本、声明格式和结构化媒体引用。Markdown、MFM 和平台纯文本不可互相冒充：转换必须是显式的，无法表达的语法在发布前给出警告。平台 emoji 可保存短代码与可选图片引用；预览使用对应渲染器或降级为清楚标注的文本。
 
-媒体先进入本地存储，计算校验值并记录 MIME/尺寸/替代文本。发布前由 adapter 校验大小、数量和格式，必要时生成平台要求的派生图。预览不应为了显示而偷偷从远端下载受保护媒体。
+媒体先进入本地存储，计算校验值并记录 MIME/尺寸/替代文本。首版发布前只由 adapter 校验并报告平台的大小、数量和格式限制，不自动裁剪、压缩或转码；只允许生成用于 WebUI 预览的本地缩略图。预览不应为了显示而偷偷从远端下载受保护媒体。自动媒体处理属于 Backlog。
 
 ## 翻译 provider
 
@@ -128,6 +128,6 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 - **D1：URL 不触发后台抓取。** 反爬、登录和可见性差异使 URL 不能代表可读内容；URL 标记与用户主动快照分开，故障边界清楚。
 - **D2：浏览器桥接只读取当前可见 DOM，发布默认人工确认。** 这让私密内容依赖用户已有权限，并把平台页面变化和最终发布风险留给用户确认。
 - **D3：快照是本地事实，不是远端缓存。** 它支持跨平台复用和历史可追溯，同时不需要定时访问第三方。
-- **D4：Variant 可 detached。** 平台版本必须能自由改写；复制后不被基础稿或其他版本悄悄覆盖。
+- **D4：Variant 显式区分 linked 与 detached。** 从 BaseDraft 首次生成的是 linked 并记录 source revision；源稿变化只标记 outdated，用户确认应用更新后才更新版本。首次直接编辑自动转 detached，从其他 Variant 复制也默认 detached；绝不做实时同步或静默覆盖。
 - **D5：单体 + 应用层复用。** 单用户本地项目不需要微服务，但 CLI/WebUI/适配器必须共享校验、状态和幂等逻辑。
 - **D6：能力由 adapter 声明。** 平台差异先暴露给预览和用户，再逐步扩展实现，避免承诺所有站点都支持同样的格式。
