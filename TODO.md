@@ -7,9 +7,9 @@
 依赖：无。目标是从“创建内容”走到“在一个 Mastodon-compatible 实例成功发布并看见记录”。
 
 - [ ] 建立 Go 单体入口、Vue 3 + TypeScript SPA、SQLite 迁移和本地媒体目录；默认只监听回环地址。
-- [ ] 实现 Profile、Account、Topic、BaseDraft、Variant、Media、Publication 的最小 CRUD 和状态流转。
+- [ ] 实现 Profile、Account、Topic、BaseDraft、Variant、Media、Publication 的最小 CRUD 和状态流转；Account 必须且只能属于一个 Profile，不设计共享 Account。
 - [ ] 实现从 BaseDraft 生成 linked Variant（记录 source revision）；源稿变化只标记 `outdated`，用户确认应用更新/重新生成后才更新，首次直接编辑自动转 detached；从其他 Variant 复制默认 detached；提供预览和图片上传。
-- [ ] 实现 Mastodon-compatible adapter：实例 URL/令牌配置、文本与媒体校验（只报告平台限制）、媒体上传、可见性/内容警告、发布结果归一化；仅生成本地预览缩略图，不自动裁剪、压缩或转码。
+- [ ] 实现 Mastodon-compatible adapter：实例 URL/令牌配置、文本与媒体校验（只报告平台限制）、媒体上传、可见性/内容警告、发布结果归一化；获取并按实例缓存 custom emoji，在预览渲染，发布发送原生短代码/规则；仅生成本地预览缩略图，不自动裁剪、压缩或转码。
 - [ ] 提供对应 CLI（创建/编辑或导入版本、预览、发布、重试、查看记录），并与 WebUI 复用应用层。
 - [ ] 提供 ExternalPost 的“仅标记 URL”路径；该操作不产生后台网络请求。
 
@@ -17,16 +17,16 @@
 
 必要测试策略：
 
-- [ ] Go 单元测试覆盖 linked/source revision/outdated 更新、首次编辑自动 detached、跨 Variant detached 复制、能力/字符/媒体校验、幂等键和 URL 标记不触网。
+- [ ] Go 单元测试覆盖 Profile/Account 所属约束、linked/source revision/outdated 更新、首次编辑自动 detached、跨 Variant detached 复制、各实体状态和 needs_confirmation 语义、能力/字符/媒体校验、幂等键和 URL 标记不触网。
 - [ ] Go SQLite 集成测试覆盖迁移、重启后读取，以及媒体与发布历史的关联。
-- [ ] adapter contract 测试使用假的 Mastodon-compatible HTTP server，覆盖媒体先传后发、错误归类和规范化结果。
+- [ ] adapter contract 测试使用假的 Mastodon-compatible HTTP server，覆盖 custom emoji 获取/按实例缓存/预览数据、媒体先传后发、错误归类和规范化结果。
 - [ ] Vue 单测覆盖编辑/保存、Variant 状态显示、预览警告和 URL 标记表单；CLI 至少有一条应用层端到端测试。
 
 ## 节点 2：Misskey/MFM + Bluesky
 
 依赖：节点 1 的领域模型、媒体存储、adapter 接口和 CLI/WebUI 发布流程。目标是在同一 Topic 中新增两种官方 API 平台，而不引入时间线抓取。
 
-- [ ] 实现 Misskey 官方 API adapter，支持 note 文本、媒体、可见性、CW 和自定义 emoji。
+- [ ] 实现 Misskey 官方 API adapter，支持 note 文本、媒体、可见性、CW 和自定义 emoji；预览使用原生规则，发送保留原生短代码。
 - [ ] 保存并预览原始 MFM；对不能表达的 Markdown/HTML 给出明确警告，不静默改写。
 - [ ] 实现 Bluesky 官方 AT Protocol adapter：会话、文本 facet、图片 blob、记录 URI/CID 等结果。
 - [ ] 为两种 adapter 声明字符、格式、媒体和可见性 capability，并让表单/预览使用 capability 校验。
@@ -37,7 +37,7 @@
 必要测试策略：
 
 - [ ] Go adapter contract 测试用 fixture HTTP/AT Protocol 服务覆盖成功、鉴权、限流、媒体限制和可重试性。
-- [ ] MFM/Markdown/纯文本转换与 emoji 规范化使用表格化单元测试，保留不会被误发送的原始文本。
+- [ ] MFM/Markdown/纯文本转换与 emoji 规范化使用表格化单元测试，覆盖 Misskey 自定义 emoji 的原生短代码保留，保留不会被误发送的原始文本。
 - [ ] Bluesky facet 字节偏移、图片 blob 和 URI/CID 解析使用固定 Unicode/媒体 fixture。
 - [ ] Vue 单测覆盖 capability 驱动的选项、MFM 预览标识和导入模式选择。
 

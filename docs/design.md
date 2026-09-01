@@ -28,8 +28,8 @@ WebUI 与 CLI 都是本地入口。HTTP API 只监听本地回环地址；若未
 
 以下是指导实现的边界，不要求一开始为每个概念建过度通用的框架。
 
-- **Profile**：内容身份分组，例如个人或项目品牌。包含名称、默认语言和可选描述。
-- **Account**：某个平台的一个账号连接。一个平台可有多个 Account；保存平台类型、显示名称、远端身份和凭据引用，不把令牌放入正文或日志。
+- **Profile**：内容身份分组，例如个人或项目品牌。包含名称、默认语言和可选描述。一个 Profile 可以拥有多个平台、多个账号。
+- **Account**：某个平台的一个账号连接，且必须且只能属于一个 Profile。一个平台可在同一 Profile 下有多个 Account；保存平台类型、显示名称、远端身份和凭据引用，不把令牌放入正文或日志。不设计共享 Account，也不允许 Account 跨 Profile 复用。
 - **Topic**：一个跨平台话题/创作单元，包含标题、状态和关联的 BaseDraft、Variant、Publication、ExternalPost。
 - **BaseDraft**：与平台无关的主文稿，可含文字、结构化媒体引用、语言和编辑元数据。它是版本生成的来源，不代表已发布内容。
 - **Variant**：Topic 在某个平台/Account 上的实际版本，保存正文格式、平台选项、媒体顺序、语言和来源。首次从 BaseDraft 生成的平台版本为 **linked**，并记录生成时的 BaseDraft revision；从其他 Variant 复制的版本默认是 **detached**。
@@ -41,7 +41,13 @@ WebUI 与 CLI 都是本地入口。HTTP API 只监听本地回环地址；若未
 
 Variant 与 BaseDraft 的关系遵循一个简单规则：首次生成是 **linked**，记录源 revision；BaseDraft 变化时，系统只把 linked Variant 标记为 `outdated`/“有更新”，绝不静默覆盖平台版本。用户必须主动选择“应用更新”或重新生成，确认后才把当前 BaseDraft 内容应用到该 Variant，并更新其源 revision。用户第一次直接编辑平台 Variant 时自动转为 **detached**（界面应明确提示），之后 BaseDraft 更新不再标记或覆盖它；从其他 Variant 复制也始终是 detached。这样保留来源追踪而不引入实时同步或复杂冲突合并。
 
-建议的 Topic/Variant/Publication 状态足够简单：`draft`、`ready`、`publishing`、`published`、`failed`、`archived`。`publishing` 在程序重启后必须能恢复为可检查状态；失败不能伪装成未尝试。成功发布与外部标记都应显示来源是本程序还是人工关联。
+三种实体使用各自的最小状态，不共享一个状态枚举：
+
+- **Topic**：`active`、`archived`。新建时为 active；归档只影响工作列表，不删除其版本和历史。
+- **Variant**：`draft`、`ready`。`linked`/`detached` 是与 BaseDraft 的关系，不是状态；linked 的源 revision 落后于 BaseDraft 当前 revision 时派生显示 `outdated`，用户主动应用更新后清除。detached 永远不会因源稿变化被标记或覆盖。
+- **Publication**：`pending`、`publishing`、`published`、`failed`、`needs_confirmation`。网络超时或桥接结果不明时使用 `needs_confirmation`（结果未知/待确认），不能当作失败或未发布；用户检查平台后可补录远端结果。外部关联的来源另以 `source=internal|external` 等来源信息记录，不改变发布状态。
+
+`publishing` 在程序重启后必须能恢复为可检查状态；失败不能伪装成未尝试。
 
 ## 存储与应用 API 边界
 
@@ -51,18 +57,18 @@ SQLite 表按上述实体拆分，使用稳定的本地 ID、创建/更新时间
 
 ## Profile、账号与凭据
 
-Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能指向一个平台身份，但同一平台可有多个 Account。删除或停用 Account 不得删除历史 Publication。
+Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能指向一个平台身份，且只能归属一个 Profile；同一 Profile 可有多个平台和多个 Account，同一平台也可有多个 Account。不设计共享 Account。删除或停用 Account 不得删除历史 Publication。
 
 凭据通过本地凭据存储或操作系统 keychain 保存，SQLite 只保存引用和非敏感元数据。token 不出现在 API 响应、CLI 普通输出、错误消息或日志中。用户主动导出数据时默认排除凭据，导入时明确提示可能含敏感内容。
 
 ## 平台能力与 adapter
 
-应用层面向一个小的发布接口：校验 Variant、生成平台请求、上传所需媒体、提交、规范化远端结果。每个 adapter 另提供 capability 描述（字符限制、格式、emoji、媒体类型/数量、可见性、是否支持编辑/草稿等），预览和表单据此工作。平台特有选项保存在 Variant 的平台选项中，未知选项不能静默丢弃。
+应用层面向一个小的发布接口：校验 Variant、生成平台请求、上传所需媒体、提交、规范化远端结果。每个 adapter 另提供 capability 描述（字符/字节限制、内容格式、emoji 规则、媒体类型/数量、可见性、内容警告），预览和首版表单据此工作。平台特有选项保存在 Variant 的平台选项中，未知选项不能静默丢弃。
 
 ### Fediverse
 
-- **Mastodon-compatible**：使用实例提供的标准 API，配置实例 URL、令牌、可见性、内容警告和媒体上传；实例能力差异以运行时错误呈现。
-- **Misskey**：使用官方 API，支持 MFM（至少保存原始 MFM，不把 Markdown 假装成 MFM），note 可见性、CW 和自定义 emoji 作为能力/选项处理。MFM 预览需要明确标记其渲染器，避免误发 HTML。
+- **Mastodon-compatible**：使用实例提供的标准 API，配置实例 URL、令牌、可见性、内容警告和媒体上传；首节点在账号设置或用户主动刷新时获取实例 custom emoji，按实例 URL 缓存其短代码与图片信息，在预览中渲染；发布仍发送平台原生短代码/规则，缓存不可用时回退为短代码。实例能力差异以运行时错误呈现，不做后台轮询刷新。
+- **Misskey**：使用官方 API，支持 MFM（至少保存原始 MFM，不把 Markdown 假装成 MFM），note 可见性、CW 和自定义 emoji 作为能力/选项处理；保留原生短代码/规则发送。MFM 预览需要明确标记其渲染器，避免误发 HTML。
 
 两者都只发布用户选定的 Variant，不抓取关注时间线，也不默认扫描账号最近帖子。URL 导入若没有官方可用的单帖查询，则保持 URL 标记模式。
 
@@ -113,7 +119,7 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 ## 失败、重试与幂等
 
-网络、鉴权、能力校验、媒体上传和平台限流要分类记录。只有明确可安全重试的错误才提供“重试”操作；鉴权失败先要求更新 Account。发布请求生成本地幂等键并记录远端结果，超时后重试前提示用户检查平台，避免重复发帖。浏览器桥接超时不能推断“未发布”，应保持待确认状态并允许用户用 URL 标记成功结果。
+网络、鉴权、能力校验、媒体上传和平台限流要分类记录。只有明确可安全重试的错误才提供“重试”操作；鉴权失败先要求更新 Account。发布请求生成本地幂等键并记录远端结果，超时后重试前提示用户检查平台，避免重复发帖。浏览器桥接超时不能推断“未发布”，应保持 `needs_confirmation` 并允许用户用 URL 标记成功结果。
 
 ## 备份与恢复
 
