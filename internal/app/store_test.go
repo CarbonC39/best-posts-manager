@@ -1,0 +1,143 @@
+package app
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestStoreCoreAndVariantRelations(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p, err := s.CreateProfile(ctx, Profile{Name: "personal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateAccount(ctx, Account{ProfileID: "missing", Platform: "mastodon", Name: "bad"}); err != ErrNotFound {
+		t.Fatalf("expected profile constraint, got %v", err)
+	}
+	a, err := s.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "mastodon", Name: "main", BaseURL: "http://example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "mastodon", Name: "second", BaseURL: "http://example.test"}); err != nil {
+		t.Fatalf("a profile must allow multiple accounts on the same platform: %v", err)
+	}
+	topic, err := s.CreateTopic(ctx, Topic{ProfileID: p.ID, Title: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: a.ID}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Relation != "linked" || v.SourceRevision != "1" {
+		t.Fatalf("unexpected linked variant: %+v", v)
+	}
+	if _, err = s.UpdateBaseDraft(ctx, BaseDraft{TopicID: topic.ID, Text: "changed", Format: "plain"}); err != nil {
+		t.Fatal(err)
+	}
+	v, err = s.GetVariant(ctx, v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Outdated {
+		t.Fatal("linked variant should become outdated")
+	}
+	if _, err = s.ApplyVariantUpdate(ctx, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	v, err = s.GetVariant(ctx, v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Outdated || v.Text != "changed" {
+		t.Fatalf("update was not applied: %+v", v)
+	}
+	v.Text = "platform edit"
+	v, err = s.UpdateVariant(ctx, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Relation != "detached" {
+		t.Fatal("first direct edit should detach")
+	}
+	copyV, err := s.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: a.ID}, v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copyV.Relation != "detached" {
+		t.Fatal("variant copy should be detached")
+	}
+	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: topic.ID, Platform: "x", URL: "https://x.test/post/1", CapturedBy: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(dir, "image.png")
+	if err = os.WriteFile(mediaPath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AddMedia(ctx, Media{TopicID: topic.ID, VariantID: v.ID, Filename: "image.png", MIME: "image/png", Path: mediaPath, Size: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "shared.png", MIME: "image/png", Path: mediaPath, Size: 3}); err != nil {
+		t.Fatalf("topic-level media should use a NULL variant reference: %v", err)
+	}
+	if _, err = s.CreatePublication(ctx, Publication{VariantID: v.ID, AccountID: a.ID, Status: "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got, e := reopened.GetBaseDraft(ctx, topic.ID); e != nil || got.Text != "changed" {
+		t.Fatalf("draft did not persist: %+v %v", got, e)
+	}
+	if got, e := reopened.ListVariants(ctx, topic.ID); e != nil || len(got) != 2 {
+		t.Fatalf("variants did not persist: %d %v", len(got), e)
+	}
+	if got, e := reopened.ListMedia(ctx, topic.ID); e != nil || len(got) != 2 {
+		t.Fatalf("media did not persist: %d %v", len(got), e)
+	}
+	if got, e := reopened.ListPublications(ctx); e != nil || len(got) != 1 {
+		t.Fatalf("publication history did not persist: %d %v", len(got), e)
+	}
+}
+
+func TestStoreRejectsCrossTopicReferences(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p1, _ := s.CreateProfile(ctx, Profile{Name: "one"})
+	p2, _ := s.CreateProfile(ctx, Profile{Name: "two"})
+	a1, _ := s.CreateAccount(ctx, Account{ProfileID: p1.ID, Platform: "mastodon", Name: "one"})
+	a2, _ := s.CreateAccount(ctx, Account{ProfileID: p2.ID, Platform: "mastodon", Name: "two"})
+	t1, _ := s.CreateTopic(ctx, Topic{ProfileID: p1.ID, Title: "one"})
+	t2, _ := s.CreateTopic(ctx, Topic{ProfileID: p2.ID, Title: "two"})
+	v1, _ := s.CreateVariant(ctx, Variant{TopicID: t1.ID, AccountID: a1.ID}, "")
+	if _, err = s.CreateVariant(ctx, Variant{TopicID: t2.ID, AccountID: a2.ID}, v1.ID); err == nil {
+		t.Fatal("cross-topic variant copy must be rejected")
+	}
+	mediaPath := filepath.Join(s.MediaDir, "image")
+	if err = os.WriteFile(mediaPath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AddMedia(ctx, Media{TopicID: t2.ID, VariantID: v1.ID, Filename: "x.png", MIME: "image/png", Path: mediaPath, Size: 3}); err == nil {
+		t.Fatal("cross-topic media reference must be rejected")
+	}
+	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: t2.ID, AccountID: a1.ID, Platform: "x", URL: "https://x.test/1"}); err == nil {
+		t.Fatal("cross-profile external account must be rejected")
+	}
+}

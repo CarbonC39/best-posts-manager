@@ -6,21 +6,21 @@
 
 依赖：无。目标是从“创建内容”走到“在一个 Mastodon-compatible 实例成功发布并看见记录”。
 
-- [ ] 建立 Go 单体入口、Vue 3 + TypeScript SPA、SQLite 迁移和本地媒体目录；默认只监听回环地址。
-- [ ] 实现 Profile、Account、Topic、BaseDraft、Variant、Media、Publication 的最小 CRUD 和状态流转；Account 必须且只能属于一个 Profile，不设计共享 Account。
-- [ ] 实现从 BaseDraft 生成 linked Variant（记录 source revision）；源稿变化只标记 `outdated`，用户确认应用更新/重新生成后才更新，首次直接编辑自动转 detached；从其他 Variant 复制默认 detached；提供预览和图片上传。
-- [ ] 实现 Mastodon-compatible adapter：实例 URL/令牌配置、文本与媒体校验（只报告平台限制）、媒体上传、可见性/内容警告、发布结果归一化；获取并按实例缓存 custom emoji，在预览渲染，发布发送原生短代码/规则；仅生成本地预览缩略图，不自动裁剪、压缩或转码。
-- [ ] 提供对应 CLI（创建/编辑或导入版本、预览、发布、重试、查看记录），并与 WebUI 复用应用层。
-- [ ] 提供 ExternalPost 的“仅标记 URL”路径；该操作不产生后台网络请求。
+- [x] 建立 Go 单体入口、Vue 3 + TypeScript SPA、SQLite 迁移和本地媒体目录；默认只监听回环地址。
+- [x] 实现 Profile、Account、Topic、BaseDraft、Variant、Media、Publication 的最小创建/读取和必要编辑；Account 必须且只能属于一个 Profile，不设计共享 Account。
+- [x] 实现从 BaseDraft 生成 linked Variant（记录 source revision）；源稿变化只标记 `outdated`，用户确认应用更新/重新生成后才更新，首次直接编辑自动转 detached；从其他 Variant 复制默认 detached；提供预览和图片上传。
+- [x] 实现 Mastodon-compatible adapter：实例 URL/令牌配置、文本与媒体校验（只报告平台限制）、媒体上传、可见性/内容警告、发布结果归一化；获取并按实例缓存 custom emoji，在预览渲染，发布发送原生短代码/规则；仅生成本地预览缩略图，不自动裁剪、压缩或转码。
+- [x] 提供对应 CLI（serve、Profile/Account/Topic 创建与查看、Draft/Variant 编辑与应用更新、媒体、预览、发布、重试、历史、URL 标记），并与 WebUI 复用应用层。
+- [x] 提供 ExternalPost 的“仅标记 URL”路径；该操作不产生后台网络请求。
 
 验收标准：用户可在全新本地目录创建 Profile、账号和 Topic，编辑基础稿，生成 Variant，附图并从 WebUI 或 CLI 发布；成功的远端 ID/URL、时间和媒体关联能在重启后查看；失败显示可行动原因且不会丢稿；粘贴 URL 只产生本地关联记录。
 
 必要测试策略：
 
-- [ ] Go 单元测试覆盖 Profile/Account 所属约束、linked/source revision/outdated 更新、首次编辑自动 detached、跨 Variant detached 复制、各实体状态和 needs_confirmation 语义、能力/字符/媒体校验、幂等键和 URL 标记不触网。
-- [ ] Go SQLite 集成测试覆盖迁移、重启后读取，以及媒体与发布历史的关联。
-- [ ] adapter contract 测试使用假的 Mastodon-compatible HTTP server，覆盖 custom emoji 获取/按实例缓存/预览数据、媒体先传后发、错误归类和规范化结果。
-- [ ] Vue 单测覆盖编辑/保存、Variant 状态显示、预览警告和 URL 标记表单；CLI 至少有一条应用层端到端测试。
+- [x] Go 单元测试覆盖 Profile/Account 所属约束、linked/source revision/outdated 更新、首次编辑自动 detached、跨 Variant detached 复制、各实体状态和 needs_confirmation 语义、能力/字符/媒体校验、幂等键和 URL 标记不触网。
+- [x] Go SQLite 集成测试覆盖迁移、重启后读取，以及媒体与发布历史的关联。
+- [x] adapter contract 测试使用假的 Mastodon-compatible HTTP server，覆盖 custom emoji 获取/按实例缓存/预览数据、媒体先传后发、错误归类和规范化结果。
+- [x] Vue 单测覆盖编辑/保存、Variant 状态显示、预览警告和 URL 标记表单；CLI 至少有一条应用层端到端测试。
 
 ## 节点 2：Misskey/MFM + Bluesky
 

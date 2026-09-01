@@ -40,3 +40,21 @@ Go 单体程序承载本地 API、应用层和嵌入的 Vue SPA；SQLite 保存�
 - [开发 TODO](TODO.md)
 
 项目仍在设计和快速实现阶段，平台能力以各适配器的实际支持范围为准。
+
+## 本地运行（节点 1）
+
+需要 Go 1.23+。默认数据目录位于操作系统用户配置目录下的 `best-post-manager`，也可以用 `BPM_DATA_DIR` 指定一个权限受限的本地目录：
+
+```sh
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm serve
+```
+
+然后打开 `http://127.0.0.1:8787/`。CLI 与服务使用同一数据目录，例如：
+
+```sh
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm profile add personal
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm topic add <profile-id> "一个话题"
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm history
+```
+
+Mastodon-compatible Account 只保存 token 环境变量名，不把 token 写入 SQLite；发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。节点 1 使用这一最小方案，后续再接操作系统 keychain。
