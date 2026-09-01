@@ -10,18 +10,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/bridge"
 	"best-post-manager/internal/platform"
 	"best-post-manager/internal/service"
 )
 
 type Server struct {
-	Svc    *service.Service
-	Static http.Handler
+	Svc      *service.Service
+	Static   http.Handler
+	Bridge   *bridge.Manager
+	bridgeMu sync.Mutex
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/bridge/v1/") {
+		s.bridgeScript(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		s.api(w, r)
 		return
@@ -52,6 +60,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")
 	if path == "health" {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
+		return
+	}
+	if strings.HasPrefix(path, "bridge/") {
+		s.bridgeAdmin(w, r)
 		return
 	}
 	switch {

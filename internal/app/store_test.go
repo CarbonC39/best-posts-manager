@@ -75,7 +75,7 @@ func TestStoreCoreAndVariantRelations(t *testing.T) {
 	if copyV.Relation != "detached" {
 		t.Fatal("variant copy should be detached")
 	}
-	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: topic.ID, Platform: "x", URL: "https://x.test/post/1", CapturedBy: "manual"}); err != nil {
+	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: topic.ID, Platform: "x", URL: "https://x.test/post/1", TextSnapshot: "visible", MediaSnapshot: []ExternalMedia{{Filename: "p.png", MIME: "image/png"}}, CapturedBy: "browser", Incomplete: true, IncompleteReason: "collapsed"}); err != nil {
 		t.Fatal(err)
 	}
 	mediaPath := filepath.Join(dir, "image.png")
@@ -110,6 +110,9 @@ func TestStoreCoreAndVariantRelations(t *testing.T) {
 	}
 	if got, e := reopened.ListPublications(ctx); e != nil || len(got) != 1 || got[0].RemoteCID != "cid-test" {
 		t.Fatalf("publication history did not persist: %d %v", len(got), e)
+	}
+	if got, e := reopened.ListExternalPosts(ctx, topic.ID); e != nil || len(got) != 1 || got[0].TextSnapshot != "visible" || !got[0].Incomplete || len(got[0].MediaSnapshot) != 1 {
+		t.Fatalf("external snapshot did not persist: %+v %v", got, e)
 	}
 }
 

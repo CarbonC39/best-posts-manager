@@ -59,7 +59,7 @@ SQLite 表按上述实体拆分，使用稳定的本地 ID、创建/更新时间
 
 Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能指向一个平台身份，且只能归属一个 Profile；同一 Profile 可有多个平台和多个 Account，同一平台也可有多个 Account。不设计共享 Account。删除或停用 Account 不得删除历史 Publication。
 
-凭据通过本地凭据存储或操作系统 keychain 保存，SQLite 只保存引用和非敏感元数据。token 不出现在 API 响应、CLI 普通输出、错误消息或日志中。用户主动导出数据时默认排除凭据，导入时明确提示可能含敏感内容。
+平台长期凭据通过本地凭据存储或操作系统 keychain 保存，SQLite 只保存引用和非敏感元数据；它们不出现在 API 响应、CLI 普通输出、错误消息或日志中。浏览器桥接的短期 bearer 是例外：只由 `hello` 成功响应签发一次，随后仅以哈希留在 Go 进程内存。用户主动导出数据时默认排除凭据，导入时明确提示可能含敏感内容。
 
 ## 平台能力与 adapter
 
@@ -77,13 +77,19 @@ Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能�
 
 使用官方 AT Protocol XRPC：`com.atproto.server.createSession` 建立内存会话，`repo.uploadBlob` 上传图片，`repo.createRecord` 创建 `app.bsky.feed.post`；`resolveHandle`/`repo.getRecord` 使用 GET 查询。处理链接/提及的 UTF-8 byteStart/byteEnd facets 和图片 blob。远端记录 key/URI/CID 等标识，发布前完成 3000-byte record 与图片限制校验。`createRecord` 不提供本地可复用的幂等键，最终提交未知时保持待确认。首版只做明确的发帖/单帖导入能力，不做时间线同步。
 
+### 浏览器桥接平台能力
+
+X、微博、小红书、QQ 空间的 capability 只描述文本填充、媒体数量/顺序和可见性提示，不声称存在稳定公开发布 API。Account 对这些平台可不填写 `base_url`/`token_env`；实际页面 URL 在配对和每次请求时按精确 host 后缀校验。QQ 空间的可见范围和图片顺序必须由用户在页面人工确认。
+
 ## 浏览器桥接
 
 X、微博、小红书和 QQ 空间无法依赖稳定的公开发布 API 时，使用用户主动安装的浏览器用户脚本。脚本是平台适配器，不是服务端爬虫；它在用户已经登录、当前可见的页面读取 DOM，将结构化消息发到本地桥接端点。
 
 ### 协议
 
-桥接协议应有版本号、一次性配对码/短期 token、请求 ID 和消息类型，至少包括 `hello`、`fill`、`capture`、`result`、`error`。消息包含平台、页面 URL、可选远端 ID、文本/媒体描述、可见性和用户确认所需的提示。请求大小、媒体数量和来源 URL 要有限制；所有消息在本地回环端点校验来源和 token。
+节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发八小时 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次，token 只存内存哈希，撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL、日志或 SQLite。
+
+管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication，脚本只填充，用户人工发布后回传 URL/ID；超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本没有发布按钮点击权限，也不调用隐藏 API。
 
 本地端点默认只接受一次配对后短期有效的请求，并拒绝任意跨域调用。token 不写入网页内容、URL 或普通日志。脚本应显示连接状态和实际发送的数据摘要，让用户能撤销配对。桥接端点只服务当前本地用户，不是通用远程 API。
 
@@ -100,7 +106,7 @@ ExternalPost 有两种有意不同的模式：
 1. **URL 标记**：保存平台、Account（若已知）、URL/远端 ID、时间、可见性（若用户提供）和备注。此操作零网络抓取，用于表示已发布。
 2. **内容快照**：通过浏览器桥接或官方单帖 API，由用户请求后保存正文、媒体描述、格式、作者/时间和捕获方式。快照是当时内容的本地副本，原帖删除或变私密后仍可用于复用。
 
-媒体只在浏览器脚本确实有权读取并成功传回时本地化；跨域或权限阻止读取时保存元数据并提示手动添加。快照不会定时刷新，也不会因打开 Topic 触发远端请求。
+媒体只在浏览器脚本确实有权读取并成功传回时本地化；跨域或权限阻止读取时保存元数据并提示手动添加。当前 `ExternalPost` 额外保存媒体描述、`incomplete` 和原因。快照不会定时刷新，也不会因打开 Topic 触发远端请求。
 
 ## 内容格式、emoji、媒体与预览
 

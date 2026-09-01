@@ -1,0 +1,115 @@
+import { captureVisible, fillVisibleWithMedia, type BridgeRequest } from './bridgeAdapters'
+
+declare function GM_xmlhttpRequest(options: Record<string, unknown>): void
+
+type PairingResponse = { id: string; token: string }
+type ScriptRequest = BridgeRequest & { id: string; kind: 'fill' | 'capture' }
+type Config = { base: string; token: string; pairing: string }
+
+const host = location.hostname.toLowerCase()
+const platform = host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')
+  ? 'x' : host === 'weibo.com' || host.endsWith('.weibo.com')
+    ? 'weibo' : host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com') ? 'xiaohongshu' : 'qzone'
+const saved = JSON.parse(localStorage.getItem('bpm-bridge-config-v1') || '{}') as Partial<Config>
+const config: Config = { base: saved.base || 'http://127.0.0.1:8787', token: '', pairing: '' }
+let current: ScriptRequest | null = null
+let polling = false
+
+function gmRequest(options: Record<string, unknown>): Promise<{ status: number; responseText: string; response: unknown }> {
+  return new Promise((resolve, reject) => GM_xmlhttpRequest({ ...options, onload: resolve, onerror: reject, ontimeout: reject }))
+}
+function headers() {
+  return { Authorization: `Bearer ${config.token}`, 'X-BPM-Page-URL': location.href, 'X-BPM-Pairing-ID': config.pairing, 'X-BPM-Platform': platform, 'Content-Type': 'application/json' }
+}
+async function call<T>(path: string, init: { method?: string; body?: string } = {}): Promise<T> {
+  const response = await gmRequest({ method: init.method || 'GET', url: config.base.replace(/\/$/, '') + path, headers: headers(), data: init.body, timeout: 10_000 })
+  let body: any
+  try { body = JSON.parse(response.responseText) } catch { throw new Error(`本地桥接返回了无效响应（HTTP ${response.status}）`) }
+  if (response.status < 200 || response.status >= 300) throw new Error(body.error || `HTTP ${response.status}`)
+  return body as T
+}
+async function localMediaFetcher(path: string) {
+  const response = await gmRequest({ method: 'GET', url: config.base.replace(/\/$/, '') + path, responseType: 'blob', timeout: 30_000 })
+  return { ok: response.status >= 200 && response.status < 300, status: response.status, blob: async () => response.response as Blob } as Response
+}
+
+const panel = document.createElement('div')
+panel.style.cssText = 'position:fixed;z-index:2147483647;right:12px;bottom:12px;background:#fff;color:#111;border:1px solid #888;padding:10px;font:13px sans-serif;width:280px;box-shadow:0 2px 8px #0003'
+panel.innerHTML = '<b>Best Post Manager bridge v1</b><div data-bpm="platform"></div><div data-bpm="status">未连接</div><input data-bpm="base" placeholder="本地服务地址"><input data-bpm="code" placeholder="一次性 pairing code"><button data-bpm="connect">连接</button><div data-bpm="request"></div>'
+const panelHost = document.createElement('div')
+panelHost.attachShadow({ mode: 'closed' }).appendChild(panel)
+document.body.appendChild(panelHost)
+const element = <T extends HTMLElement>(name: string) => panel.querySelector(`[data-bpm="${name}"]`) as T
+element('platform').textContent = `当前平台：${platform}`
+element<HTMLInputElement>('base').value = config.base
+const status = (text: string) => { element('status').textContent = text }
+const requestBox = element('request')
+const addButton = (label: string, action: () => void) => { const button = document.createElement('button'); button.textContent = label; button.addEventListener('click', action); requestBox.appendChild(button) }
+
+async function connect() {
+  config.base = element<HTMLInputElement>('base').value.trim().replace(/\/$/, '')
+  const code = element<HTMLInputElement>('code').value.trim()
+  if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(config.base)) throw new Error('本地服务地址必须是 127.0.0.1 或 localhost')
+  if (!code) throw new Error('请输入 WebUI 生成的一次性 pairing code')
+  localStorage.setItem('bpm-bridge-config-v1', JSON.stringify({ base: config.base }))
+  const hello = await call<PairingResponse>('/bridge/v1/hello', { method: 'POST', body: JSON.stringify({ code, platform, page_url: location.href }) })
+  config.token = hello.token
+  config.pairing = hello.id
+  element<HTMLInputElement>('code').value = ''
+  status('已连接；token 仅保存在当前页面内存中')
+  if (!polling) { polling = true; void poll() }
+}
+
+function showCapture(request: ScriptRequest) {
+  const summary = document.createElement('div')
+  summary.textContent = '本地请求：捕获当前可见帖子'
+  requestBox.appendChild(summary)
+  addButton('确认捕获当前可见内容', () => void (async () => {
+    const snapshot = captureVisible(platform, location.href)
+    await call(`/bridge/v1/requests/${request.id}/capture`, { method: 'POST', body: JSON.stringify(snapshot) })
+    status(snapshot.incomplete ? `已保存不完整快照：${snapshot.incomplete_reason}` : '已保存当前可见快照')
+    current = null
+    requestBox.replaceChildren()
+  })().catch((error) => status(`捕获失败：${String(error)}`)))
+}
+
+function showFill(request: ScriptRequest) {
+  const summary = document.createElement('div')
+  summary.textContent = `待填入：${(request.text || '').slice(0, 80)}；图片 ${request.media?.length || 0} 张`
+  requestBox.appendChild(summary)
+  addButton('填入（绝不发布）', () => void (async () => {
+    try {
+      const failures = await fillVisibleWithMedia(platform, request, localMediaFetcher)
+      status(failures.length ? `文字已填入；请人工处理：${failures.join('；')}` : '已填入，请人工检查可见范围和图片顺序后发布')
+    } catch (error) {
+      await call(`/bridge/v1/requests/${request.id}/error`, { method: 'POST', body: JSON.stringify({ error: String(error) }) })
+      status(`填入失败：${String(error)}`)
+      current = null
+    }
+  })())
+  const resultURL = document.createElement('input')
+  resultURL.placeholder = '发布后的帖子永久链接'
+  resultURL.value = location.href
+  requestBox.appendChild(resultURL)
+  addButton('我已人工发布，回传链接', () => void (async () => {
+    await call(`/bridge/v1/requests/${request.id}/result`, { method: 'POST', body: JSON.stringify({ url: resultURL.value.trim() }) })
+    status('已回传人工确认的发布结果')
+    current = null
+    requestBox.replaceChildren()
+  })().catch((error) => status(`回传失败：${String(error)}`)))
+}
+
+async function poll() {
+  try {
+    const requests = await call<ScriptRequest[]>('/bridge/v1/requests')
+    const request = requests[0]
+    if (request && request.id !== current?.id) {
+      current = request
+      requestBox.replaceChildren()
+      if (request.kind === 'capture') showCapture(request); else showFill(request)
+    }
+  } catch (error) { status(`连接不可用：${error instanceof Error ? error.message : String(error)}`) }
+  window.setTimeout(() => void poll(), 3_000)
+}
+
+element('connect').addEventListener('click', () => void connect().catch((error) => status(`连接失败：${error instanceof Error ? error.message : String(error)}`)))

@@ -41,7 +41,7 @@ Go 单体程序承载本地 API、应用层和嵌入的 Vue SPA；SQLite 保存�
 
 项目仍在设计和快速实现阶段，平台能力以各适配器的实际支持范围为准。
 
-## 本地运行（节点 1、2）
+## 本地运行（节点 1–3）
 
 需要 Go 1.23+。默认数据目录位于操作系统用户配置目录下的 `best-post-manager`，也可以用 `BPM_DATA_DIR` 指定一个权限受限的本地目录：
 
@@ -70,3 +70,15 @@ BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm import <topic-id> <account-id> "https
 ```
 
 Misskey 保留 MFM 原文并使用官方 API；Bluesky 生成链接/提及 facets 并记录 URI/CID。导入只调用用户主动指定的单帖官方端点，不扫描时间线，也不会因仅标记 URL 而联网。
+
+### 节点 3 浏览器桥接
+
+用户脚本位于 [`frontend/userscript/bpm-bridge.user.js`](frontend/userscript/bpm-bridge.user.js)，可在 Tampermonkey/Violentmonkey 中安装。启动本地服务后，在编辑器的“浏览器桥接 v1”生成对应平台配对，只把一次性 code 填入脚本；hello 成功后本地服务才签发八小时 bearer，code 立即失效，token 只以哈希保存在 Go 进程并只明文保留在当前平台页面的脚本内存中，可从 WebUI 撤销。脚本只匹配 X、微博、小红书和 QQ 空间的当前页面，读取可见 DOM、填充文本/图片并回传结果；它绝不会点击最终发布按钮。
+
+填入请求会先创建 `needs_confirmation` 发布记录。请在平台页人工检查并发布，再点击脚本的“我已人工发布，回传 URL”；超时或脚本错误不会自动重试。捕获请求也必须由 WebUI 主动创建，脚本只回传当前页面可见正文；折叠或无法读取的内容会标记为不完整。当前四个平台的页面选择器和真实登录流程尚未验收，页面结构变化时请人工检查并补充。
+
+X、微博、小红书和 QQ 空间账号只用于关联 Profile/Variant，`base_url` 与 `token_env` 可留空；页面权限完全来自浏览器当前登录会话。
+
+```sh
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm account add <profile-id> qzone qzone-main
+```

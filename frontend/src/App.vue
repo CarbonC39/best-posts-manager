@@ -9,9 +9,11 @@ type Topic = { id: string; profile_id: string; title: string; status: string }
 type Draft = { topic_id: string; text: string; format: string; revision: number }
 type Variant = { id: string; topic_id: string; account_id: string; text: string; format: string; status: string; relation: string; visibility: string; spoiler_text: string; local_only: boolean; outdated: boolean }
 type Media = { id: string; variant_id: string; filename: string; alt_text: string }
-type ExternalPost = { id: string; platform: string; url: string }
+type ExternalPost = { id: string; platform: string; url: string; text_snapshot: string; incomplete: boolean; incomplete_reason: string }
 type Emoji = { shortcode: string; url: string; static_url: string }
-type Capability = { platform: string; format: string; text_max_bytes: number; max_media: number; max_media_bytes: number; visibilities: string[]; supports_cw: boolean; supports_local_only: boolean; custom_emoji: boolean }
+type BridgePairing = { id: string; platform: string; code?: string; expires_at: string; code_used: boolean; revoked: boolean }
+type BridgeRequest = { id: string; kind: string; status: string; error?: string; external_post_id?: string }
+type Capability = { platform: string; format: string; text_max_bytes: number; max_media: number; max_media_bytes: number; visibilities: string[]; supports_cw: boolean; supports_local_only: boolean; custom_emoji: boolean; visibility_note?: string }
 
 const section = ref('topics')
 const profiles = ref<Profile[]>([])
@@ -41,6 +43,11 @@ const externalReference = ref('')
 const externalPlatform = ref('mastodon')
 const externalAccountID = ref('')
 const accountPlatform = ref('mastodon')
+const bridgePairings = ref<BridgePairing[]>([])
+const bridgePlatform = ref('x')
+const bridgePageURL = ref('')
+const bridgeMessage = ref('')
+const bridgeRequest = ref<BridgeRequest | null>(null)
 const baseURLPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'Bluesky PDS URL' : '平台实例 URL')
 const tokenEnvPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'app password 环境变量名' : 'token 环境变量名')
 
@@ -49,6 +56,10 @@ const profileTopics = computed(() => topics.value.filter((topic) => topic.profil
 const selectedCapability = computed(() => capabilities.value[selectedAccountID.value])
 const selectedAccount = computed(() => accounts.value.find((account) => account.id === selectedAccountID.value))
 const canImportOfficially = computed(() => selectedAccount.value?.platform === 'misskey' || selectedAccount.value?.platform === 'bluesky')
+
+function isBridgePlatform(platform: string) {
+  return ['x', 'weibo', 'xiaohongshu', 'qzone'].includes(platform)
+}
 
 function variantCapability(variant: Variant) {
   return capabilities.value[variant.account_id]
@@ -70,9 +81,12 @@ function showError(error: unknown) {
 
 async function load() {
   try {
-    ;[profiles.value, accounts.value, topics.value] = await Promise.all([
-      api<Profile[]>('profiles'), api<Account[]>('accounts'), api<Topic[]>('topics'),
-    ])
+    const existingPairings = new Map(bridgePairings.value.map((pairing) => [pairing.id, pairing]))
+    const loaded = await Promise.all([
+      api<Profile[]>('profiles'), api<Account[]>('accounts'), api<Topic[]>('topics'), api<BridgePairing[]>('bridge/pairings'),
+    ] as const)
+    profiles.value = loaded[0]; accounts.value = loaded[1]; topics.value = loaded[2]
+    bridgePairings.value = loaded[3].map((pairing) => ({ ...existingPairings.get(pairing.id), ...pairing }))
     capabilities.value = Object.fromEntries(await Promise.all(accounts.value.map(async (account) => [account.id, await api<Capability>(`accounts/${account.id}/capability`)])))
     if (!selectedProfileID.value && profiles.value[0]) selectedProfileID.value = profiles.value[0].id
     if (!selectedAccountID.value && profileAccounts.value[0]) selectedAccountID.value = profileAccounts.value[0].id
@@ -195,6 +209,34 @@ async function loadEmoji() {
     message.value = `已加载 ${emojis.value.length} 个实例 emoji`
   } catch (error) { message.value = `emoji 加载失败：${error instanceof Error ? error.message : String(error)}` }
 }
+async function createBridgePairing() {
+  try { const pairing = await api<BridgePairing>('bridge/pairings', { method: 'POST', body: JSON.stringify({ platform: bridgePlatform.value }) }); bridgePairings.value.unshift(pairing); bridgeMessage.value = `请在 10 分钟内把一次性 code ${pairing.code} 输入用户脚本；bearer 将由配对交换并只保存在页面内存中` } catch (error) { showError(error) }
+}
+async function revokeBridgePairing(pairing: BridgePairing) {
+  try { await api(`bridge/pairings/${pairing.id}/revoke`, { method: 'POST' }); pairing.revoked = true; bridgeMessage.value = '配对已撤销' } catch (error) { showError(error) }
+}
+async function fillBrowser(variant: Variant) {
+  const account = accounts.value.find((item) => item.id === variant.account_id)
+  const pairing = bridgePairings.value.find((item) => item.code_used && !item.revoked && item.platform === account?.platform)
+  if (!pairing || !bridgePageURL.value.trim()) { bridgeMessage.value = '请先完成匹配平台的配对、刷新状态，并填写平台页面 URL'; return }
+  try { bridgeRequest.value = await api<BridgeRequest>('bridge/requests/fill', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, variant_id: variant.id, page_url: bridgePageURL.value }) }); bridgeMessage.value = '已发送填充请求：请在平台页检查后人工发布' } catch (error) { showError(error) }
+}
+async function requestCapture() {
+  if (!selected.value || !selectedAccountID.value || !bridgePageURL.value.trim()) { bridgeMessage.value = '请选择账号并填写当前平台页面 URL'; return }
+  const account = accounts.value.find((item) => item.id === selectedAccountID.value)
+  const pairing = bridgePairings.value.find((item) => item.code_used && !item.revoked && item.platform === account?.platform)
+  if (!pairing || !['x', 'weibo', 'xiaohongshu', 'qzone'].includes(account?.platform || '')) { bridgeMessage.value = '请先创建匹配平台的配对'; return }
+  try { bridgeRequest.value = await api<BridgeRequest>('bridge/requests/capture', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, topic_id: selected.value.id, account_id: selectedAccountID.value, platform: account?.platform, page_url: bridgePageURL.value }) }); bridgeMessage.value = '已创建捕获请求：用户脚本只读取当前可见页面' } catch (error) { showError(error) }
+}
+async function refreshBridgeState() {
+  try {
+    const existing = new Map(bridgePairings.value.map((pairing) => [pairing.id, pairing]))
+    bridgePairings.value = (await api<BridgePairing[]>('bridge/pairings')).map((pairing) => ({ ...existing.get(pairing.id), ...pairing }))
+    if (bridgeRequest.value) bridgeRequest.value = await api<BridgeRequest>(`bridge/requests/${bridgeRequest.value.id}`)
+    if (selected.value) externalPosts.value = await api<ExternalPost[]>(`external-posts?topic_id=${selected.value.id}`)
+    bridgeMessage.value = '桥接状态与站外快照已刷新'
+  } catch (error) { showError(error) }
+}
 
 onMounted(load)
 </script>
@@ -207,7 +249,7 @@ onMounted(load)
       <section v-if="section==='topics'">
         <h2>话题</h2><label>Profile <select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select></label>
         <form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button>添加 Profile</button></form>
-        <form @submit.prevent="addAccount"><input v-model="accountName" placeholder="账号名称"><select v-model="accountPlatform"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option></select><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier"><input v-model="baseURL" :placeholder="baseURLPlaceholder"><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder"><button>添加账号</button></form>
+        <form @submit.prevent="addAccount"><input v-model="accountName" placeholder="账号名称"><select v-model="accountPlatform"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier"><input v-if="!isBridgePlatform(accountPlatform)" v-model="baseURL" :placeholder="baseURLPlaceholder"><input v-if="!isBridgePlatform(accountPlatform)" v-model="tokenEnv" :placeholder="tokenEnvPlaceholder"><button>添加账号</button></form>
         <form @submit.prevent="addTopic"><input v-model="topicTitle" placeholder="新话题标题"><button>添加话题</button></form>
         <ul class="rows"><li v-for="topic in profileTopics" :key="topic.id"><button class="link" @click="openTopic(topic)">{{topic.title}}</button><span>{{topic.status}}</span></li></ul>
       </section>
@@ -217,12 +259,13 @@ onMounted(load)
         <div class="actions"><select v-model="mediaVariantID"><option value="">通用媒体</option><option v-for="variant in variants" :key="variant.id" :value="variant.id">{{variant.account_id}}</option></select><input v-model="altText" placeholder="图片替代文本"><label class="upload">添加图片<input type="file" accept="image/*" @change="uploadMedia"></label></div>
         <ul v-if="media.length" class="media-list"><li v-for="item in media" :key="item.id"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span>{{item.filename}}</span></li></ul>
         <button v-if="selectedCapability?.custom_emoji" @click="loadEmoji">加载实例 emoji</button><div class="emoji-list"><span v-for="emoji in emojis" :key="emoji.shortcode" class="emoji"><img :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div>
-        <h3>平台版本</h3><small>编辑控件由账号适配器能力决定；Misskey 保留原始 MFM，Bluesky 使用纯文本与链接/提及 facets。</small>
-        <ul class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span>{{variant.account_id}} · {{variant.format}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><select v-model="variant.visibility"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="CW（可选）"><label v-if="variantCapability(variant)?.supports_local_only"><input type="checkbox" v-model="variant.local_only">仅本地</label><small v-if="variantCapability(variant)?.format==='mfm'">原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button @click="publish(variant.id)">发布</button></div></li></ul>
+        <h3>平台版本</h3><small>编辑控件由账号适配器能力决定；Misskey 保留原始 MFM，Bluesky 使用纯文本与链接/提及 facets。</small><small v-if="selectedCapability?.visibility_note">{{selectedCapability.visibility_note}}</small>
+        <ul class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span>{{variant.account_id}} · {{variant.format}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><select v-model="variant.visibility"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="CW（可选）"><label v-if="variantCapability(variant)?.supports_local_only"><input type="checkbox" v-model="variant.local_only">仅本地</label><small v-if="variantCapability(variant)?.format==='mfm'">原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button v-if="!isBridgePlatform(accounts.find(a=>a.id===variant.account_id)?.platform||'')" @click="publish(variant.id)">发布</button><button v-else @click="fillBrowser(variant)">填入浏览器（不发布）</button></div></li></ul>
+        <h3>浏览器桥接 v1</h3><small>用户脚本只读取当前可见 DOM；填入后必须在平台页人工检查并发布，程序不会点击最终发布按钮。</small><div class="actions"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button @click="createBridgePairing">生成配对</button><input v-model="bridgePageURL" placeholder="当前平台页面 URL"><button @click="requestCapture">请求捕获当前可见帖子</button><button @click="refreshBridgeState">刷新状态/快照</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><p v-if="bridgeRequest">最近请求：{{bridgeRequest.kind}} · {{bridgeRequest.status}}<span v-if="bridgeRequest.error"> · {{bridgeRequest.error}}</span></p><ul class="rows"><li v-for="pairing in bridgePairings" :key="pairing.id"><span>{{pairing.platform}} · {{pairing.revoked?'已撤销':pairing.code_used?'已连接':'待连接'}}<code v-if="pairing.code">code={{pairing.code}}</code></span><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></li></ul>
         <h3>站外关联</h3>
         <form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">无账号</option><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form>
         <form @submit.prevent="importExternal"><input v-model="externalReference" placeholder="Misskey note ID/URL 或 Bluesky URL/at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button><small v-if="!canImportOfficially">请选择 Misskey 或 Bluesky 账号</small></form>
-        <ul class="rows"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}</span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a></li></ul>
+        <ul class="rows"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small></li></ul>
       </section>
       <section v-else><h2>发布历史</h2><PublicationList/></section>
     </main>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -55,7 +56,7 @@ CREATE TABLE IF NOT EXISTS base_drafts (id TEXT PRIMARY KEY, topic_id TEXT NOT N
 CREATE TABLE IF NOT EXISTS variants (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id), text TEXT NOT NULL DEFAULT '', format TEXT NOT NULL DEFAULT 'plain', status TEXT NOT NULL DEFAULT 'draft', relation TEXT NOT NULL DEFAULT 'detached', source_revision TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'public', spoiler_text TEXT NOT NULL DEFAULT '', local_only INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, variant_id TEXT REFERENCES variants(id) ON DELETE SET NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, alt_text TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS publications (id TEXT PRIMARY KEY, variant_id TEXT NOT NULL REFERENCES variants(id), account_id TEXT NOT NULL REFERENCES accounts(id), status TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', remote_url TEXT NOT NULL DEFAULT '', remote_cid TEXT NOT NULL DEFAULT '', error_category TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL DEFAULT 'internal', published_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, account_id TEXT REFERENCES accounts(id), platform TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', text_snapshot TEXT NOT NULL DEFAULT '', captured_by TEXT NOT NULL DEFAULT 'manual', created_at TEXT NOT NULL);`)
+CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, account_id TEXT REFERENCES accounts(id), platform TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', text_snapshot TEXT NOT NULL DEFAULT '', media_snapshot TEXT NOT NULL DEFAULT '[]', captured_by TEXT NOT NULL DEFAULT 'manual', incomplete INTEGER NOT NULL DEFAULT 0, incomplete_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);`)
 	if err != nil {
 		return err
 	}
@@ -80,6 +81,20 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 			return err
 		}
 		if _, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(3)`); err != nil {
+			return err
+		}
+	}
+	if version < 4 {
+		for _, statement := range []string{
+			`ALTER TABLE external_posts ADD COLUMN media_snapshot TEXT NOT NULL DEFAULT '[]'`,
+			`ALTER TABLE external_posts ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE external_posts ADD COLUMN incomplete_reason TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err = s.DB.ExecContext(ctx, statement); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+		if _, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(4)`); err != nil {
 			return err
 		}
 	}
@@ -143,8 +158,8 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 		return a, ErrNotFound
 	}
 	a.Name = strings.TrimSpace(a.Name)
-	if a.Name == "" || (a.Platform != "mastodon" && a.Platform != "mastodon-compatible" && a.Platform != "misskey" && a.Platform != "bluesky") {
-		return a, fmt.Errorf("a name and supported platform (mastodon, misskey, bluesky) are required")
+	if a.Name == "" || !supportedPlatform(a.Platform) {
+		return a, fmt.Errorf("a name and supported platform are required")
 	}
 	if a.ID == "" {
 		a.ID = id()
@@ -154,6 +169,14 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	}
 	_, e := s.DB.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,created_at) VALUES(?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CreatedAt.Format(time.RFC3339Nano))
 	return a, e
+}
+func supportedPlatform(name string) bool {
+	switch name {
+	case "mastodon", "mastodon-compatible", "misskey", "bluesky", "x", "weibo", "xiaohongshu", "qzone":
+		return true
+	default:
+		return false
+	}
 }
 func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, error) {
 	q := `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,created_at FROM accounts`
@@ -448,7 +471,7 @@ func validVisibility(platform, visibility string) bool {
 	switch platform {
 	case "misskey":
 		allowed = []string{"public", "home", "followers"}
-	case "bluesky":
+	case "bluesky", "x", "weibo", "xiaohongshu", "qzone":
 		allowed = []string{"public"}
 	default:
 		allowed = []string{"public", "unlisted", "private", "direct"}
@@ -632,7 +655,17 @@ func (s *Store) CreateExternalPost(ctx context.Context, p ExternalPost) (Externa
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
-	_, e = s.DB.ExecContext(ctx, `INSERT INTO external_posts(id,topic_id,account_id,platform,remote_id,url,text_snapshot,captured_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, p.ID, p.TopicID, nullString(p.AccountID), p.Platform, p.RemoteID, p.URL, p.TextSnapshot, p.CapturedBy, p.CreatedAt.Format(time.RFC3339Nano))
+	if p.MediaSnapshot == nil {
+		p.MediaSnapshot = []ExternalMedia{}
+	}
+	if p.Incomplete && strings.TrimSpace(p.IncompleteReason) == "" {
+		p.IncompleteReason = "snapshot is incomplete"
+	}
+	mediaJSON, marshalErr := json.Marshal(p.MediaSnapshot)
+	if marshalErr != nil {
+		return p, marshalErr
+	}
+	_, e = s.DB.ExecContext(ctx, `INSERT INTO external_posts(id,topic_id,account_id,platform,remote_id,url,text_snapshot,media_snapshot,captured_by,incomplete,incomplete_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.TopicID, nullString(p.AccountID), p.Platform, p.RemoteID, p.URL, p.TextSnapshot, string(mediaJSON), p.CapturedBy, boolInt(p.Incomplete), p.IncompleteReason, p.CreatedAt.Format(time.RFC3339Nano))
 	return p, e
 }
 func nullString(v string) any {
@@ -642,7 +675,7 @@ func nullString(v string) any {
 	return v
 }
 func (s *Store) ListExternalPosts(ctx context.Context, topicID string) ([]ExternalPost, error) {
-	rows, e := s.DB.QueryContext(ctx, `SELECT id,topic_id,COALESCE(account_id,''),platform,remote_id,url,text_snapshot,captured_by,created_at FROM external_posts WHERE topic_id=? ORDER BY created_at DESC`, topicID)
+	rows, e := s.DB.QueryContext(ctx, `SELECT id,topic_id,COALESCE(account_id,''),platform,remote_id,url,text_snapshot,media_snapshot,captured_by,incomplete,incomplete_reason,created_at FROM external_posts WHERE topic_id=? ORDER BY created_at DESC`, topicID)
 	if e != nil {
 		return nil, e
 	}
@@ -650,10 +683,15 @@ func (s *Store) ListExternalPosts(ctx context.Context, topicID string) ([]Extern
 	var out []ExternalPost
 	for rows.Next() {
 		var p ExternalPost
-		var t string
-		if e = rows.Scan(&p.ID, &p.TopicID, &p.AccountID, &p.Platform, &p.RemoteID, &p.URL, &p.TextSnapshot, &p.CapturedBy, &t); e != nil {
+		var t, mediaJSON string
+		var incomplete int
+		if e = rows.Scan(&p.ID, &p.TopicID, &p.AccountID, &p.Platform, &p.RemoteID, &p.URL, &p.TextSnapshot, &mediaJSON, &p.CapturedBy, &incomplete, &p.IncompleteReason, &t); e != nil {
 			return nil, e
 		}
+		if e = json.Unmarshal([]byte(mediaJSON), &p.MediaSnapshot); e != nil {
+			return nil, e
+		}
+		p.Incomplete = incomplete != 0
 		p.CreatedAt = parseTime(t)
 		out = append(out, p)
 	}

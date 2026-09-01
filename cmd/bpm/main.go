@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/bridge"
 	"best-post-manager/internal/httpapi"
 	"best-post-manager/internal/service"
 )
@@ -85,7 +86,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Println("bpm serve [-addr 127.0.0.1:8787]\nbpm profile add <name> | list\nbpm account add <profile-id> <platform> <name> <base-url> [token-env] [remote-id] | list [profile-id]\nbpm topic add <profile-id> <title> | list [profile-id]\nbpm draft show|set <topic-id> [text]\nbpm variant add|show|edit|apply|list ...\nbpm media add|list <topic-id> [file] [variant-id]\nbpm publish <variant-id> | retry <publication-id>\nbpm history\nbpm import <topic-id> <account-id> <URL-or-remote-id>\nbpm external mark|list <topic-id> <platform> <url> [remote-id]")
+	fmt.Println("bpm serve [-addr 127.0.0.1:8787]\nbpm profile add <name> | list\nbpm account add <profile-id> <platform> <name> [base-url] [token-env] [remote-id] | list [profile-id]\nbpm topic add <profile-id> <title> | list [profile-id]\nbpm draft show|set <topic-id> [text]\nbpm variant add|show|edit|apply|list ...\nbpm media add|list <topic-id> [file] [variant-id]\nbpm publish <variant-id> | retry <publication-id>\nbpm history\nbpm import <topic-id> <account-id> <URL-or-remote-id>\nbpm external mark|list <topic-id> <platform> <url> [remote-id]")
 }
 func serve(svc *service.Service, args []string) {
 	f := flag.NewFlagSet("serve", flag.ExitOnError)
@@ -93,7 +94,7 @@ func serve(svc *service.Service, args []string) {
 	_ = f.Parse(args)
 	static, _ := fs.Sub(web, "dist")
 	fmt.Println("listening on http://" + *addr)
-	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: http.FileServer(http.FS(static))}); e != nil {
+	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: http.FileServer(http.FS(static)), Bridge: bridge.NewManager(svc.Store)}); e != nil {
 		fatal(e)
 	}
 }
@@ -109,10 +110,17 @@ func profile(ctx context.Context, s *app.Store, args []string) {
 }
 func account(ctx context.Context, s *app.Store, args []string) {
 	if len(args) > 0 && args[0] == "add" {
-		if len(args) < 5 {
-			fatal(fmt.Errorf("account add requires profile platform name base-url [token-env]"))
+		if len(args) < 4 {
+			fatal(fmt.Errorf("account add requires profile platform name [base-url] [token-env]"))
 		}
-		a := app.Account{ProfileID: args[1], Platform: args[2], Name: args[3], BaseURL: args[4]}
+		bridgePlatform := args[2] == "x" || args[2] == "weibo" || args[2] == "xiaohongshu" || args[2] == "qzone"
+		if !bridgePlatform && len(args) < 5 {
+			fatal(fmt.Errorf("API platform accounts require base-url"))
+		}
+		a := app.Account{ProfileID: args[1], Platform: args[2], Name: args[3]}
+		if len(args) > 4 {
+			a.BaseURL = args[4]
+		}
 		if len(args) > 5 {
 			a.TokenEnv = args[5]
 		}

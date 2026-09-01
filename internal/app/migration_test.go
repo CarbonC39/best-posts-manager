@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-func TestV1DatabaseMigratesToV3WithoutDataLoss(t *testing.T) {
+func TestV1DatabaseMigratesToV4WithoutDataLoss(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);INSERT INTO schema_migrations VALUES(1);CREATE TABLE variants(id TEXT PRIMARY KEY,topic_id TEXT,account_id TEXT,text TEXT,format TEXT,status TEXT,relation TEXT,source_revision TEXT,visibility TEXT,spoiler_text TEXT,created_at TEXT,updated_at TEXT);INSERT INTO variants VALUES('v1','t1','a1','old','plain','draft','linked','1','public','','now','now');`)
+	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);INSERT INTO schema_migrations VALUES(1);CREATE TABLE variants(id TEXT PRIMARY KEY,topic_id TEXT,account_id TEXT,text TEXT,format TEXT,status TEXT,relation TEXT,source_revision TEXT,visibility TEXT,spoiler_text TEXT,created_at TEXT,updated_at TEXT);INSERT INTO variants VALUES('v1','t1','a1','old','plain','draft','linked','1','public','','now','now');CREATE TABLE external_posts(id TEXT PRIMARY KEY,topic_id TEXT,account_id TEXT,platform TEXT,remote_id TEXT,url TEXT,text_snapshot TEXT,captured_by TEXT,created_at TEXT);INSERT INTO external_posts VALUES('e1','t1','','x','','https://x.com/1','old','manual','now');`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestV1DatabaseMigratesToV3WithoutDataLoss(t *testing.T) {
 		t.Fatalf("unexpected migrated local_only: %d", local)
 	}
 	var version int
-	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	var cid string
@@ -42,5 +42,9 @@ func TestV1DatabaseMigratesToV3WithoutDataLoss(t *testing.T) {
 		if err != nil {
 			t.Fatalf("remote_cid column was not migrated: %v", err)
 		}
+	}
+	var mediaJSON string
+	if err = st.DB.QueryRow(`SELECT media_snapshot FROM external_posts WHERE id='e1'`).Scan(&mediaJSON); err != nil || mediaJSON != "[]" {
+		t.Fatalf("external snapshot migration failed: %q %v", mediaJSON, err)
 	}
 }

@@ -81,13 +81,23 @@ type Publication struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 type ExternalPost struct {
-	ID           string    `json:"id"`
-	TopicID      string    `json:"topic_id"`
-	AccountID    string    `json:"account_id"`
-	Platform     string    `json:"platform"`
-	RemoteID     string    `json:"remote_id"`
-	URL          string    `json:"url"`
-	TextSnapshot string    `json:"text_snapshot"`
-	CapturedBy   string    `json:"captured_by"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID               string          `json:"id"`
+	TopicID          string          `json:"topic_id"`
+	AccountID        string          `json:"account_id"`
+	Platform         string          `json:"platform"`
+	RemoteID         string          `json:"remote_id"`
+	URL              string          `json:"url"`
+	TextSnapshot     string          `json:"text_snapshot"`
+	MediaSnapshot    []ExternalMedia `json:"media_snapshot"`
+	CapturedBy       string          `json:"captured_by"`
+	Incomplete       bool            `json:"incomplete"`
+	IncompleteReason string          `json:"incomplete_reason"`
+	CreatedAt        time.Time       `json:"created_at"`
+}
+type ExternalMedia struct {
+	Filename string `json:"filename"`
+	MIME     string `json:"mime"`
+	URL      string `json:"url"`
+	AltText  string `json:"alt_text"`
+	Size     int64  `json:"size"`
 }
