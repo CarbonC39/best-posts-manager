@@ -17,12 +17,32 @@ import (
 	"time"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/credential"
 )
 
 type MisskeyClient struct {
-	HTTP  *http.Client
-	emoji map[string][]Emoji
-	mu    sync.Mutex
+	HTTP        *http.Client
+	Credentials credential.Store
+	emoji       map[string][]Emoji
+	mu          sync.Mutex
+}
+
+func (c *MisskeyClient) token(a app.Account, stage string) (string, error) {
+	if a.CredentialRef != "" {
+		if c.Credentials == nil {
+			return "", &Error{Category: "config", Stage: stage, Err: errors.New("credential store is unavailable")}
+		}
+		value, err := c.Credentials.Get(a.CredentialRef)
+		if err != nil {
+			return "", &Error{Category: "config", Stage: stage, Err: errors.New("saved credential is unavailable; reconnect the account")}
+		}
+		return value, nil
+	}
+	value := strings.TrimSpace(os.Getenv(a.TokenEnv))
+	if a.TokenEnv == "" || value == "" {
+		return "", &Error{Category: "config", Stage: stage, Err: errors.New("Misskey token_env is empty")}
+	}
+	return value, nil
 }
 
 func NewMisskeyClient() *MisskeyClient {
@@ -30,9 +50,9 @@ func NewMisskeyClient() *MisskeyClient {
 }
 
 func (c *MisskeyClient) request(ctx context.Context, a app.Account, endpoint string, payload any, stage string) (*http.Response, error) {
-	token := strings.TrimSpace(os.Getenv(a.TokenEnv))
-	if a.TokenEnv == "" || token == "" {
-		return nil, &Error{Category: "config", Stage: stage, Err: errors.New("Misskey token_env is empty")}
+	token, tokenErr := c.token(a, stage)
+	if tokenErr != nil {
+		return nil, tokenErr
 	}
 	raw, _ := json.Marshal(payload)
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.BaseURL, "/")+"/api/"+endpoint, bytes.NewReader(raw))
@@ -71,7 +91,11 @@ func (c *MisskeyClient) CustomEmoji(ctx context.Context, a app.Account) ([]Emoji
 		return append([]Emoji(nil), v...), nil
 	}
 	c.mu.Unlock()
-	resp, e := c.request(ctx, a, "emojis", map[string]any{"i": strings.TrimSpace(os.Getenv(a.TokenEnv))}, "emoji")
+	token, tokenErr := c.token(a, "emoji")
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
+	resp, e := c.request(ctx, a, "emojis", map[string]any{"i": token}, "emoji")
 	if e != nil {
 		return nil, e
 	}
@@ -103,9 +127,9 @@ func (c *MisskeyClient) CustomEmoji(ctx context.Context, a app.Account) ([]Emoji
 	return out, nil
 }
 func (c *MisskeyClient) Publish(ctx context.Context, a app.Account, v app.Variant, media []app.Media) (Result, error) {
-	token := strings.TrimSpace(os.Getenv(a.TokenEnv))
-	if a.TokenEnv == "" || token == "" {
-		return Result{}, &Error{Category: "config", Stage: "validate", Err: errors.New("Misskey token_env is empty")}
+	token, tokenErr := c.token(a, "validate")
+	if tokenErr != nil {
+		return Result{}, tokenErr
 	}
 	if v.Text == "" {
 		return Result{}, &Error{Category: "validation", Stage: "validate", Err: errors.New("text is empty")}
@@ -219,7 +243,11 @@ func (c *MisskeyClient) Import(ctx context.Context, a app.Account, noteID string
 	if strings.TrimSpace(noteID) == "" {
 		return app.ExternalPost{}, &Error{Category: "validation", Stage: "import", Err: errors.New("Misskey note ID or URL is required")}
 	}
-	resp, e := c.request(ctx, a, "notes/show", map[string]any{"i": strings.TrimSpace(os.Getenv(a.TokenEnv)), "noteId": noteID}, "import")
+	token, tokenErr := c.token(a, "import")
+	if tokenErr != nil {
+		return app.ExternalPost{}, tokenErr
+	}
+	resp, e := c.request(ctx, a, "notes/show", map[string]any{"i": token, "noteId": noteID}, "import")
 	if e != nil {
 		return app.ExternalPost{}, e
 	}

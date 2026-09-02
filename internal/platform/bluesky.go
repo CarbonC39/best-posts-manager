@@ -16,10 +16,14 @@ import (
 	"unicode/utf8"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/credential"
 	"github.com/rivo/uniseg"
 )
 
-type BlueskyClient struct{ HTTP *http.Client }
+type BlueskyClient struct {
+	HTTP        *http.Client
+	Credentials credential.Store
+}
 
 func NewBlueskyClient() *BlueskyClient {
 	return &BlueskyClient{HTTP: &http.Client{Timeout: 30 * time.Second}}
@@ -95,10 +99,23 @@ func decodeXRPCResponse(resp *http.Response, stage string) (json.RawMessage, err
 	return out, nil
 }
 func (c *BlueskyClient) session(ctx context.Context, a app.Account) (bskySession, error) {
-	if a.TokenEnv == "" || strings.TrimSpace(os.Getenv(a.TokenEnv)) == "" {
-		return bskySession{}, &Error{Category: "config", Stage: "auth", Err: errors.New("Bluesky app password token_env is empty")}
+	password := ""
+	if a.CredentialRef != "" {
+		if c.Credentials == nil {
+			return bskySession{}, &Error{Category: "config", Stage: "auth", Err: errors.New("credential store is unavailable")}
+		}
+		var err error
+		password, err = c.Credentials.Get(a.CredentialRef)
+		if err != nil {
+			return bskySession{}, &Error{Category: "config", Stage: "auth", Err: errors.New("saved credential is unavailable; reconnect the account")}
+		}
+	} else {
+		password = strings.TrimSpace(os.Getenv(a.TokenEnv))
+		if a.TokenEnv == "" || password == "" {
+			return bskySession{}, &Error{Category: "config", Stage: "auth", Err: errors.New("Bluesky app password token_env is empty")}
+		}
 	}
-	raw, e := c.call(ctx, a, "com.atproto.server.createSession", map[string]string{"identifier": a.RemoteID, "password": os.Getenv(a.TokenEnv)}, "auth", "")
+	raw, e := c.call(ctx, a, "com.atproto.server.createSession", map[string]string{"identifier": a.RemoteID, "password": password}, "auth", "")
 	if e != nil {
 		return bskySession{}, e
 	}

@@ -15,8 +15,10 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/credential"
 	"best-post-manager/internal/platform"
 )
 
@@ -31,13 +33,14 @@ type Provider interface {
 }
 
 type HTTPProvider struct {
-	Config app.TranslationConfig
-	HTTP   *http.Client
+	Config      app.TranslationConfig
+	HTTP        *http.Client
+	Credentials credential.Store
 }
 
 func NewProvider(c app.TranslationConfig) (Provider, error) {
 	switch c.Provider {
-	case "google", "google-cloud", "deepl", "openai", "openai-compatible":
+	case "google", "google-cloud", "deepl", "openai", "openai-compatible", "google-gtx":
 		return &HTTPProvider{Config: c, HTTP: &http.Client{Timeout: 45 * time.Second}}, nil
 	default:
 		return nil, &platform.Error{Category: "config", Stage: "translate", Err: fmt.Errorf("unsupported translation provider %q", c.Provider)}
@@ -55,6 +58,8 @@ func (p *HTTPProvider) Translate(ctx context.Context, in Request) (string, error
 		return p.deepl(ctx, in)
 	case "openai", "openai-compatible":
 		return p.openai(ctx, in)
+	case "google-gtx":
+		return p.googleGTX(ctx, in)
 	default:
 		return "", &platform.Error{Category: "config", Stage: "translate", Err: errors.New("unsupported translation provider")}
 	}
@@ -69,6 +74,20 @@ func (p *HTTPProvider) credential(env, label string) (string, error) {
 		return "", &platform.Error{Category: "config", Stage: "auth", Err: fmt.Errorf("%s environment variable %q is empty", label, env)}
 	}
 	return value, nil
+}
+
+func (p *HTTPProvider) secret(env, ref, label string) (string, error) {
+	if ref != "" {
+		if p.Credentials == nil {
+			return "", &platform.Error{Category: "config", Stage: "auth", Err: errors.New("credential store is unavailable")}
+		}
+		value, err := p.Credentials.Get(ref)
+		if err != nil {
+			return "", &platform.Error{Category: "config", Stage: "auth", Err: errors.New("saved credential is unavailable; reconnect the provider")}
+		}
+		return value, nil
+	}
+	return p.credential(env, label)
 }
 
 func (p *HTTPProvider) endpoint(defaultBase, path string) string {
@@ -116,7 +135,7 @@ func (p *HTTPProvider) do(ctx context.Context, method, endpoint string, body io.
 }
 
 func (p *HTTPProvider) google(ctx context.Context, in Request) (string, error) {
-	token, err := p.credential(p.Config.TokenEnv, "Google access token")
+	token, err := p.secret(p.Config.TokenEnv, p.Config.CredentialRef, "Google access token")
 	if err != nil {
 		return "", err
 	}
@@ -147,8 +166,45 @@ func (p *HTTPProvider) google(ctx context.Context, in Request) (string, error) {
 	return result.Translations[0].Text, nil
 }
 
+// googleGTX is the unofficial web translation endpoint. It is intentionally
+// separate from Cloud Translation: it has no credential and may disappear.
+func (p *HTTPProvider) googleGTX(ctx context.Context, in Request) (string, error) {
+	if utf8.RuneCountInString(in.Text) > 5000 {
+		return "", &platform.Error{Category: "validation", Stage: "translate", Err: errors.New("Google translate_a unofficial endpoint accepts at most 5000 Unicode characters")}
+	}
+	query := url.Values{"client": {"gtx"}, "sl": {"auto"}, "tl": {in.TargetLanguage}, "dt": {"t"}, "q": {in.Text}}
+	if strings.TrimSpace(in.SourceLanguage) != "" {
+		query.Set("sl", in.SourceLanguage)
+	}
+	endpoint := p.endpoint("https://translate.googleapis.com", "/translate_a/single") + "?" + query.Encode()
+	response, err := p.do(ctx, http.MethodGet, endpoint, nil, "", nil, "translate")
+	if err != nil {
+		return "", err
+	}
+	var envelope []json.RawMessage
+	if err := json.Unmarshal(response, &envelope); err != nil || len(envelope) == 0 {
+		return "", &platform.Error{Category: "protocol", Stage: "translate", Err: errors.New("Google translate_a response was invalid")}
+	}
+	var segments [][]any
+	if err := json.Unmarshal(envelope[0], &segments); err != nil {
+		return "", &platform.Error{Category: "protocol", Stage: "translate", Err: errors.New("Google translate_a response was invalid")}
+	}
+	var out strings.Builder
+	for _, segment := range segments {
+		if len(segment) > 0 {
+			if value, ok := segment[0].(string); ok {
+				out.WriteString(value)
+			}
+		}
+	}
+	if out.Len() == 0 {
+		return "", &platform.Error{Category: "protocol", Stage: "translate", Err: errors.New("Google translate_a response had no translated text")}
+	}
+	return out.String(), nil
+}
+
 func (p *HTTPProvider) deepl(ctx context.Context, in Request) (string, error) {
-	key, err := p.credential(p.Config.KeyEnv, "DeepL API key")
+	key, err := p.secret(p.Config.KeyEnv, p.Config.CredentialRef, "DeepL API key")
 	if err != nil {
 		return "", err
 	}
@@ -173,7 +229,7 @@ func (p *HTTPProvider) deepl(ctx context.Context, in Request) (string, error) {
 }
 
 func (p *HTTPProvider) openai(ctx context.Context, in Request) (string, error) {
-	token, err := p.credential(p.Config.TokenEnv, "OpenAI API token")
+	token, err := p.secret(p.Config.TokenEnv, p.Config.CredentialRef, "OpenAI API token")
 	if err != nil {
 		return "", err
 	}

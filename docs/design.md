@@ -118,9 +118,9 @@ ExternalPost 有两种有意不同的模式：
 
 翻译是显式的应用操作：用户选择源语言、目标语言、provider 和要翻译的 Variant/文本范围，结果创建新的 Variant 或草稿，不覆盖原文。Provider 接口只需提交文本和语言、返回译文及 provider 元数据；Google Translate、DeepL、OpenAI-compatible 实现可替换。密钥走凭据存储，失败保留原文并展示可重试原因。翻译结果发布前仍须经过平台能力校验和用户确认。
 
-节点 4 的最小实现为 `TranslationConfig` + `Translation`：配置只保存 provider、可覆盖的 base URL、Google project/location、OpenAI model 和 `TokenEnv`/`KeyEnv` 环境变量名；环境变量值只在一次 HTTP 请求期间读取。Google 使用 Cloud Translation v3 `projects/{project}:translateText` 和 Bearer，DeepL 使用 `/v2/translate` 与 `DeepL-Auth-Key`，OpenAI-compatible 使用 `/v1/responses`、`store:false`，兼容顶层 `output_text` 和标准 output content。base URL 可替换为本地 fixture，便于不接触真实服务的 contract 测试。
+节点 4 的最小实现为 `TranslationConfig` + `Translation`：配置只保存 provider、可覆盖的 base URL、Google project/location、OpenAI model 和 `TokenEnv`/`KeyEnv` 环境变量名或 `credential_ref`；环境变量值只在一次 HTTP 请求期间读取。Google 使用 Cloud Translation v3 `projects/{project}:translateText` 和 Bearer，DeepL 使用 `/v2/translate` 与 `DeepL-Auth-Key`，OpenAI-compatible 使用 `/v1/responses`、`store:false`，兼容顶层 `output_text` 和标准 output content。另提供 `google-gtx` 的非官方 `translate_a/single` 兼容 provider：不需要凭据，严格在本地以 `utf8.RuneCountInString` 限制 5000 Unicode 字符，响应仅解析分段译文；base URL 可替换为本地 fixture，便于不接触真实服务的 contract 测试。它可能失效，不作为官方 SLA。
 
-应用层先完成 provider 请求，成功后在一个 SQLite 事务中创建目标 Variant（`detached`）和可追溯 Translation 记录；失败时不创建目标版本。源 Variant、目标 Account、目标语言和 provider/config ID 都由用户明确选择，目标平台仍按自己的 capability 校验。当前凭据方案是环境变量引用，未把 keychain 引入依赖；因此 UI、CLI、日志和备份都只显示引用名，并提示用户自行保护环境。
+应用层先完成 provider 请求，成功后在一个 SQLite 事务中创建目标 Variant（`detached`）和可追溯 Translation 记录；失败时不创建目标版本。源 Variant、目标 Account、目标语言和 provider/config ID 都由用户明确选择，目标平台仍按自己的 capability 校验。当前凭据方案支持权限受限的本地 credential 引用，并保留环境变量引用作为手动配置 fallback；未引入操作系统 keychain。UI、CLI、日志和普通备份都不显示 secret。
 
 ## WebUI 与 CLI
 
@@ -138,7 +138,13 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 提供导出 SQLite 数据、媒体文件和不含凭据的清单的备份命令；恢复前校验版本、校验值和迁移状态，避免覆盖当前数据。备份应能在本地离线完成。凭据单独重新配置，不把 token 混入普通备份。数据库迁移要可检测失败并保留原文件，发布历史是不可丢失的审计线索。
 
-节点 4 使用标准库 ZIP：`bpm backup create archive.zip` 先用 SQLite `VACUUM INTO` 生成一致快照，再收集 `media/` 和 manifest（格式版本、schema 版本、文件大小、SHA-256）。恢复先在临时目录验证所有路径、清单、校验和及 SQLite migration 状态，目标必须不存在或为空，验证成功后才重命名进入目标目录；非空目标和损坏归档都拒绝。归档中没有环境变量值或 token。v5 migration 在单独事务中建立翻译配置/记录表并写入版本号，失败会 rollback，不推进 migration 版本。
+节点 4 使用标准库 ZIP：`bpm backup create archive.zip` 先用 SQLite `VACUUM INTO` 生成一致快照，再收集 `media/` 和 manifest（格式版本、schema 版本、文件大小、SHA-256）。恢复先在临时目录验证所有路径、清单、校验和及 SQLite migration 状态，目标必须不存在或为空，验证成功后才重命名进入目标目录；非空目标和损坏归档都拒绝。归档中没有环境变量值、`credentials.json` 或 token。v5 migration 在单独事务中建立翻译配置/记录表，v6 在独立事务中加入 Account/TranslationConfig 的 `credential_ref`，失败会 rollback，不推进 migration 版本。
+
+### 本地凭据与自动连接
+
+`credential.Store` 是小型可替换接口；默认实现把随机引用到 secret 的映射放在数据目录 `credentials.json`，目录 0700、文件 0600，写入使用临时文件原子替换并拒绝 symlink/过宽权限。SQLite 只保存 `credential_ref`，普通 API、日志、CLI 和备份不返回 secret。Mastodon/Misskey 发布优先解析引用，空引用时兼容读取 `token_env`；Bluesky 的 app password 同样只在创建会话时使用，session JWT 不落盘。测试可注入内存 Store。
+
+连接管理器只在进程内保存短期 OAuth state/client secret 或 MiAuth session，默认十分钟过期且一次性消费。Mastodon start 注册本地应用，优先发现 granular `write:statuses write:media`，否则注册与授权都使用高层 `write`；callback 仅接受回环 Host 并以固定相对地址回跳，失败清理临时凭据。Misskey 使用官方 `/miauth/{session}` 和 `/api/miauth/{session}/check`，权限为 `write:notes,write:drive`。这两个流程只创建单用户本地 Account，不共享账号或引入通用 OAuth 框架。
 
 ## 明确排除项
 

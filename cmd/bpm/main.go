@@ -17,6 +17,7 @@ import (
 	"best-post-manager/internal/app"
 	"best-post-manager/internal/backup"
 	"best-post-manager/internal/bridge"
+	"best-post-manager/internal/connection"
 	"best-post-manager/internal/httpapi"
 	"best-post-manager/internal/service"
 )
@@ -110,10 +111,21 @@ func translationConfig(ctx context.Context, s *app.Store, args []string) {
 		printResult(v, e)
 		return
 	}
-	if len(args) < 3 || args[0] != "add" {
+	if len(args) < 2 || args[0] != "add" {
 		fatal(fmt.Errorf("translation-config add requires provider token-or-key-env [base-url] [project-or-model]"))
 	}
 	c := app.TranslationConfig{Provider: args[1]}
+	if c.Provider == "google-gtx" {
+		if len(args) > 2 {
+			c.BaseURL = args[2]
+		}
+		v, e := s.CreateTranslationConfig(ctx, c)
+		printResult(v, e)
+		return
+	}
+	if len(args) < 3 {
+		fatal(fmt.Errorf("translation-config add requires provider token-or-key-env [base-url] [project-or-model]"))
+	}
 	if c.Provider == "deepl" {
 		c.KeyEnv = args[2]
 	} else {
@@ -155,7 +167,7 @@ func serve(svc *service.Service, args []string) {
 	_ = f.Parse(args)
 	static, _ := fs.Sub(web, "dist")
 	fmt.Println("listening on http://" + *addr)
-	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: http.FileServer(http.FS(static)), Bridge: bridge.NewManager(svc.Store)}); e != nil {
+	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: http.FileServer(http.FS(static)), Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials)}); e != nil {
 		fatal(e)
 	}
 }

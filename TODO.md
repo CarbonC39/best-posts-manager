@@ -69,10 +69,18 @@
 依赖：前三节点的 Variant、Media、Publication、凭据和 adapter 边界。目标是让日常使用可恢复、可备份，并能在用户选择后生成多语言版本。
 
 - [x] 实现可替换的 Google Cloud Translation v3、DeepL v2、OpenAI Responses-compatible provider；翻译显式生成新的 detached Variant/Translation 记录，不覆盖原文。
-- [x] 配置只保存凭据环境变量名，API/CLI/日志/备份不输出 secret，并提示用户自行保护环境；操作系统 keychain 仍是后续可选增强。
+- [x] 配置只保存凭据环境变量名或本地 credential 引用，API/CLI/日志/备份不输出 secret，并提示用户自行保护环境；操作系统 keychain 仍是后续可选增强。
 - [x] 分类鉴权、能力校验、媒体上传、限流、网络超时和 provider 协议错误；只对明确安全的 `retryable` 失败开放重试。
 - [x] 完成发布幂等、超时待确认、启动重启恢复、v5 事务迁移保护和本地备份/恢复（数据库、媒体、无凭据清单）。
 - [x] 补齐 WebUI/CLI 翻译入口、恢复提示、备份/凭据提示和简约界面说明；README 与设计文档已按实际范围更新。
+
+### 后续连接与凭据增强（当前实现）
+
+节点 4 的可靠性边界已完成后，以下小节点补齐单用户本地连接体验；它们不改变前三节点的范围：
+
+- [x] 本地权限受限 credential Store、v6 migration，以及 Account/TranslationConfig 的引用优先、环境变量 fallback。
+- [x] 设置页动态平台/provider 说明；Mastodon OAuth granular-scope discovery/旧实例 fallback；Misskey MiAuth；过期、重放和失败清理测试。
+- [x] 非官方 `google-gtx` provider（本地 5000 Unicode 字符校验、分段响应、fake-server 测试）；真实 provider/真实账号仍只做手工验收。
 
 验收标准：翻译可追溯且原文不变；失去网络或程序重启后能恢复编辑和发布历史；超时不会盲目重复发布；备份可在另一空目录恢复正文、媒体和记录但不泄露 token；常见错误能告诉用户下一步操作。
 

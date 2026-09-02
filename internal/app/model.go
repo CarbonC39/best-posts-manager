@@ -10,14 +10,15 @@ type Profile struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 type Account struct {
-	ID        string    `json:"id"`
-	ProfileID string    `json:"profile_id"`
-	Platform  string    `json:"platform"`
-	Name      string    `json:"name"`
-	RemoteID  string    `json:"remote_id"`
-	BaseURL   string    `json:"base_url"`
-	TokenEnv  string    `json:"token_env"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	ProfileID     string    `json:"profile_id"`
+	Platform      string    `json:"platform"`
+	Name          string    `json:"name"`
+	RemoteID      string    `json:"remote_id"`
+	BaseURL       string    `json:"base_url"`
+	TokenEnv      string    `json:"token_env"`
+	CredentialRef string    `json:"credential_ref"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 type Topic struct {
 	ID        string    `json:"id"`
@@ -105,15 +106,16 @@ type ExternalMedia struct {
 // TranslationConfig contains provider configuration, never a provider secret.
 // TokenEnv/KeyEnv are names of environment variables read only at operation time.
 type TranslationConfig struct {
-	ID        string    `json:"id"`
-	Provider  string    `json:"provider"`
-	BaseURL   string    `json:"base_url"`
-	ProjectID string    `json:"project_id"`
-	Location  string    `json:"location"`
-	TokenEnv  string    `json:"token_env"`
-	KeyEnv    string    `json:"key_env"`
-	Model     string    `json:"model"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	Provider      string    `json:"provider"`
+	BaseURL       string    `json:"base_url"`
+	ProjectID     string    `json:"project_id"`
+	Location      string    `json:"location"`
+	TokenEnv      string    `json:"token_env"`
+	KeyEnv        string    `json:"key_env"`
+	CredentialRef string    `json:"credential_ref"`
+	Model         string    `json:"model"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type Translation struct {

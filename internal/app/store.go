@@ -129,6 +129,33 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 		}
 		rollback = false
 	}
+	if version < 6 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		for _, statement := range []string{
+			`ALTER TABLE accounts ADD COLUMN credential_ref TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE translation_configs ADD COLUMN credential_ref TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, txErr = tx.ExecContext(ctx, statement); txErr != nil && !strings.Contains(txErr.Error(), "duplicate column") {
+				return txErr
+			}
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(6)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
 	return nil
 }
 
@@ -205,7 +232,7 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()
 	}
-	_, e := s.DB.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,created_at) VALUES(?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CreatedAt.Format(time.RFC3339Nano))
+	_, e := s.DB.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CredentialRef, a.CreatedAt.Format(time.RFC3339Nano))
 	return a, e
 }
 func supportedPlatform(name string) bool {
@@ -217,7 +244,7 @@ func supportedPlatform(name string) bool {
 	}
 }
 func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, error) {
-	q := `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,created_at FROM accounts`
+	q := `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,created_at FROM accounts`
 	var args []any
 	if profileID != "" {
 		q += ` WHERE profile_id=?`
@@ -233,7 +260,7 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 	for rows.Next() {
 		var a Account
 		var t string
-		if e = rows.Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &t); e != nil {
+		if e = rows.Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &t); e != nil {
 			return nil, e
 		}
 		a.CreatedAt = parseTime(t)
@@ -244,7 +271,7 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 func (s *Store) GetAccount(ctx context.Context, aid string) (Account, error) {
 	var a Account
 	var t string
-	e := s.DB.QueryRowContext(ctx, `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,created_at FROM accounts WHERE id=?`, aid).Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &t)
+	e := s.DB.QueryRowContext(ctx, `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,created_at FROM accounts WHERE id=?`, aid).Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &t)
 	if e == sql.ErrNoRows {
 		e = ErrNotFound
 	}
@@ -745,26 +772,36 @@ func (s *Store) CreateTranslationConfig(ctx context.Context, c TranslationConfig
 	}
 	switch c.Provider {
 	case "google", "google-cloud", "openai", "openai-compatible":
+		c.CredentialRef = strings.TrimSpace(c.CredentialRef)
 		c.TokenEnv = strings.TrimSpace(c.TokenEnv)
 		c.KeyEnv = ""
-		if !credentialEnvName.MatchString(c.TokenEnv) {
+		if c.CredentialRef == "" && !credentialEnvName.MatchString(c.TokenEnv) {
 			return c, fmt.Errorf("token_env must be an environment variable name, not a credential value")
 		}
+		if c.CredentialRef != "" {
+			c.TokenEnv = ""
+		}
 	case "deepl":
+		c.CredentialRef = strings.TrimSpace(c.CredentialRef)
 		c.KeyEnv = strings.TrimSpace(c.KeyEnv)
 		c.TokenEnv = ""
-		if !credentialEnvName.MatchString(c.KeyEnv) {
+		if c.CredentialRef == "" && !credentialEnvName.MatchString(c.KeyEnv) {
 			return c, fmt.Errorf("key_env must be an environment variable name, not a credential value")
 		}
+		if c.CredentialRef != "" {
+			c.KeyEnv = ""
+		}
+	case "google-gtx":
+		c.CredentialRef, c.TokenEnv, c.KeyEnv = "", "", ""
 	default:
 		return c, fmt.Errorf("unsupported translation provider %q", c.Provider)
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO translation_configs(id,provider,base_url,project_id,location,token_env,key_env,model,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, c.ID, c.Provider, c.BaseURL, c.ProjectID, c.Location, c.TokenEnv, c.KeyEnv, c.Model, c.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO translation_configs(id,provider,base_url,project_id,location,token_env,key_env,credential_ref,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, c.ID, c.Provider, c.BaseURL, c.ProjectID, c.Location, c.TokenEnv, c.KeyEnv, c.CredentialRef, c.Model, c.CreatedAt.Format(time.RFC3339Nano))
 	return c, err
 }
 
 func (s *Store) ListTranslationConfigs(ctx context.Context) ([]TranslationConfig, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,provider,base_url,project_id,location,token_env,key_env,model,created_at FROM translation_configs ORDER BY created_at`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,provider,base_url,project_id,location,token_env,key_env,credential_ref,model,created_at FROM translation_configs ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -773,7 +810,7 @@ func (s *Store) ListTranslationConfigs(ctx context.Context) ([]TranslationConfig
 	for rows.Next() {
 		var c TranslationConfig
 		var created string
-		if err := rows.Scan(&c.ID, &c.Provider, &c.BaseURL, &c.ProjectID, &c.Location, &c.TokenEnv, &c.KeyEnv, &c.Model, &created); err != nil {
+		if err := rows.Scan(&c.ID, &c.Provider, &c.BaseURL, &c.ProjectID, &c.Location, &c.TokenEnv, &c.KeyEnv, &c.CredentialRef, &c.Model, &created); err != nil {
 			return nil, err
 		}
 		c.CreatedAt = parseTime(created)
@@ -785,7 +822,7 @@ func (s *Store) ListTranslationConfigs(ctx context.Context) ([]TranslationConfig
 func (s *Store) GetTranslationConfig(ctx context.Context, id string) (TranslationConfig, error) {
 	var c TranslationConfig
 	var created string
-	err := s.DB.QueryRowContext(ctx, `SELECT id,provider,base_url,project_id,location,token_env,key_env,model,created_at FROM translation_configs WHERE id=?`, id).Scan(&c.ID, &c.Provider, &c.BaseURL, &c.ProjectID, &c.Location, &c.TokenEnv, &c.KeyEnv, &c.Model, &created)
+	err := s.DB.QueryRowContext(ctx, `SELECT id,provider,base_url,project_id,location,token_env,key_env,credential_ref,model,created_at FROM translation_configs WHERE id=?`, id).Scan(&c.ID, &c.Provider, &c.BaseURL, &c.ProjectID, &c.Location, &c.TokenEnv, &c.KeyEnv, &c.CredentialRef, &c.Model, &created)
 	if err == sql.ErrNoRows {
 		err = ErrNotFound
 	}

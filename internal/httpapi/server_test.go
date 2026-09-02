@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/connection"
 	"best-post-manager/internal/service"
 )
 
@@ -42,8 +44,8 @@ func TestJSONCoreChain(t *testing.T) {
 		t.Fatalf("profile JSON not decoded: %+v", p)
 	}
 	var a app.Account
-	post("/api/accounts", map[string]any{"profile_id": p.ID, "platform": "mastodon", "name": "a", "base_url": "http://fake", "token_env": "TOKEN"}, &a)
-	if a.ProfileID != p.ID {
+	post("/api/accounts", map[string]any{"profile_id": p.ID, "platform": "mastodon", "name": "a", "base_url": "http://fake", "token_env": "TOKEN", "credential_ref": "client-controlled"}, &a)
+	if a.ProfileID != p.ID || a.CredentialRef != "" {
 		t.Fatalf("account profile_id lost: %+v", a)
 	}
 	var topic app.Topic
@@ -87,6 +89,36 @@ func TestJSONCoreChain(t *testing.T) {
 	}
 	if got.ID != v.ID {
 		t.Fatalf("variant response id lost: %+v", got)
+	}
+}
+
+func TestConnectionStartRequiresLoopbackAndSameOrigin(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	svc := service.New(st)
+	server := &Server{Svc: svc, Connections: connection.NewManager(st, svc.Credentials)}
+
+	for _, host := range []string{"127.0.0.1:8787", "[::1]:8787", "localhost:8787"} {
+		if !localRequestHost(host) {
+			t.Fatalf("loopback host rejected: %s", host)
+		}
+	}
+	if localRequestHost("example.com:8787") {
+		t.Fatal("non-loopback host accepted")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/connections/misskey/start", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1:8787"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://attacker.example")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

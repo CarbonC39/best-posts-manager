@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/credential"
 )
 
 type Error struct {
@@ -43,10 +44,32 @@ type Capability struct {
 	MaxMediaBytes int64
 }
 type Client struct {
-	HTTP  *http.Client
-	mu    sync.Mutex
-	emoji map[string][]Emoji
-	caps  map[string]Capability
+	HTTP        *http.Client
+	Credentials credential.Store
+	mu          sync.Mutex
+	emoji       map[string][]Emoji
+	caps        map[string]Capability
+}
+
+func (c *Client) token(account app.Account, stage string) (string, error) {
+	if account.CredentialRef != "" {
+		if c.Credentials == nil {
+			return "", &Error{Category: "config", Stage: stage, Err: errors.New("credential store is unavailable")}
+		}
+		token, err := c.Credentials.Get(account.CredentialRef)
+		if err != nil {
+			return "", &Error{Category: "config", Stage: stage, Err: errors.New("saved credential is unavailable; reconnect the account")}
+		}
+		return token, nil
+	}
+	if strings.TrimSpace(account.TokenEnv) == "" {
+		return "", &Error{Category: "config", Stage: stage, Err: errors.New("token_env is required")}
+	}
+	token := strings.TrimSpace(os.Getenv(account.TokenEnv))
+	if token == "" {
+		return "", &Error{Category: "config", Stage: stage, Err: fmt.Errorf("token environment variable %q is empty", account.TokenEnv)}
+	}
+	return token, nil
 }
 
 func NewClient() *Client {
@@ -68,12 +91,9 @@ func (c *Client) capability(instance string) Capability {
 }
 
 func (c *Client) request(ctx context.Context, account app.Account, method, endpoint string, body io.Reader, contentType, stage, idempotencyKey string) (*http.Response, error) {
-	if strings.TrimSpace(account.TokenEnv) == "" {
-		return nil, &Error{Category: "config", Stage: stage, Err: errors.New("token_env is required")}
-	}
-	token := strings.TrimSpace(os.Getenv(account.TokenEnv))
-	if token == "" {
-		return nil, &Error{Category: "config", Stage: stage, Err: fmt.Errorf("token environment variable %q is empty", account.TokenEnv)}
+	token, tokenErr := c.token(account, stage)
+	if tokenErr != nil {
+		return nil, tokenErr
 	}
 	base, err := url.Parse(strings.TrimRight(account.BaseURL, "/"))
 	if err != nil || base.Scheme == "" || base.Host == "" {

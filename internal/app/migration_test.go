@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestV1DatabaseMigratesToV5WithoutDataLoss(t *testing.T) {
+func TestV1DatabaseMigratesToV6WithoutDataLoss(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
 	if err != nil {
@@ -32,7 +32,7 @@ func TestV1DatabaseMigratesToV5WithoutDataLoss(t *testing.T) {
 		t.Fatalf("unexpected migrated local_only: %d", local)
 	}
 	var version int
-	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	var cid string
@@ -46,6 +46,12 @@ func TestV1DatabaseMigratesToV5WithoutDataLoss(t *testing.T) {
 	var mediaJSON string
 	if err = st.DB.QueryRow(`SELECT media_snapshot FROM external_posts WHERE id='e1'`).Scan(&mediaJSON); err != nil || mediaJSON != "[]" {
 		t.Fatalf("external snapshot migration failed: %q %v", mediaJSON, err)
+	}
+	var credentialRef string
+	if err = st.DB.QueryRow(`SELECT credential_ref FROM accounts LIMIT 1`).Scan(&credentialRef); err != sql.ErrNoRows {
+		if err != nil {
+			t.Fatalf("credential_ref column was not migrated: %v", err)
+		}
 	}
 }
 
@@ -82,5 +88,35 @@ func TestV5MigrationFailureRollsBackVersion(t *testing.T) {
 	var tables int
 	if err = check.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('translation_configs','translations')`).Scan(&tables); err != nil || tables != 0 {
 		t.Fatalf("failed migration left partial tables: count=%d err=%v", tables, err)
+	}
+}
+
+func TestV6MigrationFailureRollsBackCredentialColumns(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(5); CREATE TABLE profiles(id TEXT PRIMARY KEY, name TEXT NOT NULL, default_language TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL); CREATE TABLE accounts(id TEXT PRIMARY KEY, profile_id TEXT, platform TEXT, name TEXT, remote_id TEXT, base_url TEXT, token_env TEXT, created_at TEXT); CREATE TABLE translation_configs(id TEXT PRIMARY KEY, provider TEXT, base_url TEXT, project_id TEXT, location TEXT, token_env TEXT, key_env TEXT, model TEXT, created_at TEXT); CREATE TRIGGER block_v6 BEFORE INSERT ON schema_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'block v6'); END; INSERT INTO profiles VALUES('p','preserved','','','now');`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err = Open(context.Background(), dir); err == nil {
+		t.Fatal("migration should fail")
+	}
+	check, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version int
+	if err = check.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	var columns int
+	if err = check.QueryRow(`SELECT count(*) FROM pragma_table_info('accounts') WHERE name='credential_ref'`).Scan(&columns); err != nil || columns != 0 {
+		t.Fatalf("partial credential migration: %d %v", columns, err)
 	}
 }

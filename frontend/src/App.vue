@@ -62,8 +62,26 @@ const translationCredentialEnv = ref('')
 const translationBaseURL = ref('')
 const translationProjectOrModel = ref('')
 const translationMessage = ref('')
+const connectionName = ref('')
+const connectionBaseURL = ref('')
+const connectionMessage = ref('')
 const baseURLPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'Bluesky PDS URL' : '平台实例 URL')
 const tokenEnvPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'app password 环境变量名' : 'token 环境变量名')
+const platformDescription = computed(() => ({
+  mastodon: 'Mastodon-compatible：推荐 OAuth 自动连接；也可手动填写实例 URL 与 token 环境变量。',
+  misskey: 'Misskey：推荐 MiAuth 自动连接；也可手动填写实例 URL 与 token 环境变量。',
+  bluesky: 'Bluesky：填写 handle/identifier、PDS URL 与 app password 环境变量。',
+  x: 'X：仅浏览器桥接，用户脚本填充后必须在页面人工发布。',
+  weibo: '微博：仅浏览器桥接，用户脚本填充后必须在页面人工发布。',
+  xiaohongshu: '小红书：仅浏览器桥接，用户脚本填充后必须在页面人工发布。',
+  qzone: 'QQ空间：仅浏览器桥接；请人工检查可见范围和图片顺序后发布。',
+} as Record<string, string>)[accountPlatform.value] || '')
+const translationProviderDescription = computed(() => ({
+  openai: 'OpenAI-compatible Responses provider；只保存环境变量名。',
+  deepl: 'DeepL v2；只保存 key 环境变量名。',
+  google: 'Google Cloud Translation v3；需要 project id 与 token 环境变量名。',
+  'google-gtx': '非官方 Google translate_a/single：最多 5000 Unicode 字符，可能失效且无需凭据。',
+} as Record<string, string>)[translationProvider.value] || '')
 
 const profileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value))
 const profileTopics = computed(() => topics.value.filter((topic) => topic.profile_id === selectedProfileID.value && topic.status === 'active'))
@@ -248,11 +266,19 @@ async function requestCapture() {
   try { bridgeRequest.value = await api<BridgeRequest>('bridge/requests/capture', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, topic_id: selected.value.id, account_id: selectedAccountID.value, platform: account?.platform, page_url: bridgePageURL.value }) }); bridgeMessage.value = '已创建捕获请求：用户脚本只读取当前可见页面' } catch (error) { showError(error) }
 }
 async function addTranslationConfig() {
-  if (!translationCredentialEnv.value.trim()) { translationMessage.value = '请填写凭据环境变量名'; return }
+  if (translationProvider.value !== 'google-gtx' && !translationCredentialEnv.value.trim()) { translationMessage.value = '请填写凭据环境变量名'; return }
   try {
-    const config = await api<TranslationConfig>('translation-configs', { method: 'POST', body: JSON.stringify({ provider: translationProvider.value, base_url: translationBaseURL.value, token_env: translationProvider.value === 'deepl' ? '' : translationCredentialEnv.value, key_env: translationProvider.value === 'deepl' ? translationCredentialEnv.value : '', project_id: translationProvider.value === 'google' ? translationProjectOrModel.value : '', model: translationProvider.value === 'openai' ? translationProjectOrModel.value : '' }) })
-    translationConfigs.value.push(config); translationConfigID.value = config.id; translationMessage.value = '翻译配置已保存（只保存环境变量名）'
+    const config = await api<TranslationConfig>('translation-configs', { method: 'POST', body: JSON.stringify({ provider: translationProvider.value, base_url: translationBaseURL.value, token_env: translationProvider.value === 'deepl' || translationProvider.value === 'google-gtx' ? '' : translationCredentialEnv.value, key_env: translationProvider.value === 'deepl' ? translationCredentialEnv.value : '', project_id: translationProvider.value === 'google' ? translationProjectOrModel.value : '', model: translationProvider.value === 'openai' ? translationProjectOrModel.value : '' }) })
+    translationConfigs.value.push(config); translationConfigID.value = config.id; translationMessage.value = '翻译配置已保存'
   } catch (error) { translationMessage.value = `配置失败：${error instanceof Error ? error.message : String(error)}` }
+}
+async function startConnection(platform: 'mastodon' | 'misskey') {
+  if (!selectedProfileID.value || !connectionBaseURL.value.trim()) { connectionMessage.value = '请选择 Profile 并填写实例 URL'; return }
+  try {
+    const result = await api<{ authorization_url: string }>(`connections/${platform}/start`, { method: 'POST', body: JSON.stringify({ profile_id: selectedProfileID.value, name: connectionName.value, base_url: connectionBaseURL.value }) })
+    connectionMessage.value = `${platform} 连接已准备，请在平台授权；回调只会保存本地凭据。`
+    window.location.href = result.authorization_url
+  } catch (error) { connectionMessage.value = `连接失败：${error instanceof Error ? error.message : String(error)}` }
 }
 async function translateVariant() {
   if (!translationSourceID.value || !translationTargetAccountID.value || !translationConfigID.value || !translationTargetLanguage.value.trim()) { translationMessage.value = '请选择源版本、目标账号、配置和目标语言'; return }
@@ -271,7 +297,18 @@ async function refreshBridgeState() {
   } catch (error) { showError(error) }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  const params = new URLSearchParams(window.location.search)
+  const connected = params.get('connection')
+  if (connected === 'mastodon' || connected === 'misskey') {
+    section.value = 'settings'
+    connectionMessage.value = `${connected === 'mastodon' ? 'Mastodon' : 'Misskey'} 连接成功，本地凭据已保存。`
+    params.delete('connection')
+    const query = params.toString()
+    window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`)
+  }
+})
 </script>
 
 <template>
@@ -304,7 +341,7 @@ onMounted(load)
         <p v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</p><ul v-else class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span class="variant-meta">{{variant.account_id}} · {{variant.format}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><select v-model="variant.visibility"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="CW（可选）"><label v-if="variantCapability(variant)?.supports_local_only"><input type="checkbox" v-model="variant.local_only">仅本地</label><small v-if="variantCapability(variant)?.format==='mfm'">原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button class="primary-action" @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button v-if="!isBridgePlatform(accounts.find(a=>a.id===variant.account_id)?.platform||'')" @click="publish(variant.id)">发布</button><button v-else @click="fillBrowser(variant)">填入浏览器（不发布）</button></div></li></ul>
         <details class="tool-section"><summary>发布与导入工具</summary><div class="tool-content"><h3>浏览器桥接 v1</h3><small>用户脚本只读取当前可见 DOM；填入后必须在平台页人工检查并发布，程序不会点击最终发布按钮。</small><div class="actions"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button @click="createBridgePairing">生成配对</button><input v-model="bridgePageURL" placeholder="当前平台页面 URL"><button @click="requestCapture">请求捕获当前可见帖子</button><button @click="refreshBridgeState">刷新状态/快照</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><p v-if="bridgeRequest">最近请求：{{bridgeRequest.kind}} · {{bridgeRequest.status}}<span v-if="bridgeRequest.error"> · {{bridgeRequest.error}}</span></p><ul class="rows"><li v-for="pairing in bridgePairings" :key="pairing.id"><span>{{pairing.platform}} · {{pairing.revoked?'已撤销':pairing.code_used?'已连接':'待连接'}}<code v-if="pairing.code">code={{pairing.code}}</code></span><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></li></ul>
           <h3>站外关联</h3><form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">无账号</option><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form><form @submit.prevent="importExternal"><input v-model="externalReference" placeholder="Misskey note ID/URL 或 Bluesky URL/at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button><small v-if="!canImportOfficially">请选择 Misskey 或 Bluesky 账号</small></form><ul class="rows"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small></li></ul></div></details>
-        <details class="tool-section"><summary>翻译工具</summary><div class="tool-content"><small>翻译只生成新的 detached Variant，不覆盖源版本；凭据只从环境变量读取。</small><div class="actions"><select v-model="translationSourceID"><option v-for="variant in variants" :key="variant.id" :value="variant.id">源：{{variant.id}}</option></select><select v-model="translationTargetAccountID"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button @click="translateVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="notice">{{translationMessage}}</p></div></details>
+        <details class="tool-section"><summary>翻译工具</summary><div class="tool-content"><small>翻译只生成新的 detached Variant，不覆盖源版本；官方 provider 凭据从本地凭据或环境变量读取。</small><div class="actions"><select v-model="translationSourceID"><option v-for="variant in variants" :key="variant.id" :value="variant.id">源：{{variant.id}}</option></select><select v-model="translationTargetAccountID"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button @click="translateVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="notice">{{translationMessage}}</p></div></details>
       </section>
       <section v-else-if="section==='editor'" class="page-section empty-editor">
         <div class="eyebrow">正在编辑</div><h1>先选择一个话题</h1><p class="lede">从内容列表打开话题后，基础稿和平台版本会显示在这里。</p><button class="primary-action" @click="section='topics'">返回内容</button>
@@ -312,9 +349,10 @@ onMounted(load)
       <section v-else-if="section==='settings'" class="page-section settings-page">
         <div class="eyebrow">偏好与连接</div><h1>设置</h1><p class="lede">Profile、账号和本地工具配置。</p>
         <div class="section-label"><span>Profile</span><small>内容分组</small></div><form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button class="primary-action">添加 Profile</button></form>
-        <div class="section-label"><span>平台账号</span><small>凭据只保存环境变量名</small></div><form @submit.prevent="addAccount"><select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"><select v-model="accountPlatform" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"><input v-if="!isBridgePlatform(accountPlatform)" v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"><input v-if="!isBridgePlatform(accountPlatform)" v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"><button :disabled="!selectedProfileID">添加账号</button></form>
-        <div class="section-label"><span>翻译 provider</span><small>配置不包含 key/token</small></div><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option></select><input v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="可选 fake/provider URL"><input v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form><p v-if="translationMessage" class="notice">{{translationMessage}}</p>
-        <div class="section-label"><span>备份与凭据</span><small>离线可恢复</small></div><p class="settings-note">使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值；恢复拒绝覆盖非空目录。当前凭据使用环境变量引用，请不要把 token 粘贴到普通字段或日志中。</p>
+        <div class="section-label"><span>平台账号</span><small>自动连接存本地凭据；手动模式引用环境变量</small></div><form @submit.prevent="addAccount"><select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"><select v-model="accountPlatform" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select><p class="settings-note platform-description">{{platformDescription}}</p><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"><input v-if="!isBridgePlatform(accountPlatform)" v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"><input v-if="!isBridgePlatform(accountPlatform)" v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"><button :disabled="!selectedProfileID">手动添加账号</button></form>
+        <div class="connection-box"><div class="section-label"><span>推荐连接</span><small>回环 OAuth / MiAuth，凭据只保存在本机</small></div><div class="actions"><input v-model="connectionName" placeholder="连接后的账号名称（可选）"><input v-model="connectionBaseURL" placeholder="Mastodon / Misskey 实例 URL"><button type="button" @click="startConnection('mastodon')" :disabled="!selectedProfileID">Mastodon OAuth</button><button type="button" @click="startConnection('misskey')" :disabled="!selectedProfileID">Misskey MiAuth</button></div><p v-if="connectionMessage" class="notice">{{connectionMessage}}</p></div>
+        <div class="section-label"><span>翻译 provider</span><small>配置不包含 key/token</small></div><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option><option value="google-gtx">Google translate_a（非官方）</option></select><p class="settings-note platform-description">{{translationProviderDescription}}</p><input v-if="translationProvider!=='google-gtx'" v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="可选 fake/provider URL"><input v-if="translationProvider!=='google-gtx'" v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form><p v-if="translationMessage" class="notice">{{translationMessage}}</p>
+        <div class="section-label"><span>备份与凭据</span><small>离线可恢复</small></div><p class="settings-note">使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值或本地凭据文件；恢复拒绝覆盖非空目录。自动连接使用本地权限受限凭据文件，手动账号仍可引用环境变量，请不要把 token 粘贴到普通字段或日志中。</p>
       </section>
       <section v-else class="page-section history-page"><div class="eyebrow">历史</div><h1>发布记录</h1><p class="lede">每次发布的结果和可恢复状态都在这里。</p><PublicationList/></section>
     </main>

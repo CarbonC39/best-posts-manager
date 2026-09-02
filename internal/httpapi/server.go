@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,15 +15,17 @@ import (
 
 	"best-post-manager/internal/app"
 	"best-post-manager/internal/bridge"
+	"best-post-manager/internal/connection"
 	"best-post-manager/internal/platform"
 	"best-post-manager/internal/service"
 )
 
 type Server struct {
-	Svc      *service.Service
-	Static   http.Handler
-	Bridge   *bridge.Manager
-	bridgeMu sync.Mutex
+	Svc         *service.Service
+	Static      http.Handler
+	Bridge      *bridge.Manager
+	Connections *connection.Manager
+	bridgeMu    sync.Mutex
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +69,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.bridgeAdmin(w, r)
 		return
 	}
+	if strings.HasPrefix(path, "connections/") {
+		s.connections(w, r)
+		return
+	}
 	switch {
 	case path == "profiles":
 		if r.Method == http.MethodGet {
@@ -107,6 +114,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, e)
 				return
 			}
+			// Credential references are assigned only by the local authorization flow.
+			v.CredentialRef = ""
 			v, e := s.Svc.Store.CreateAccount(ctx, v)
 			if e != nil {
 				status := 400
@@ -275,6 +284,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, e)
 			return
 		}
+		// There is no public endpoint for attaching an arbitrary secret reference.
+		v.CredentialRef = ""
 		v, e := s.Svc.Store.CreateTranslationConfig(ctx, v)
 		if e != nil {
 			fail(w, 400, e)
@@ -359,6 +370,103 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fail(w, 404, fmt.Errorf("unknown API route"))
+}
+
+func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
+	if s.Connections == nil {
+		fail(w, 503, fmt.Errorf("connections are unavailable"))
+		return
+	}
+	path := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/connections/"), "/")
+	if path == "status" && r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]string{"status": "ready"})
+		return
+	}
+	if path == "mastodon/start" || path == "misskey/start" {
+		if r.Method != http.MethodPost {
+			fail(w, 405, fmt.Errorf("method not allowed"))
+			return
+		}
+		if !localRequestHost(r.Host) {
+			fail(w, 400, fmt.Errorf("server must be accessed through a loopback host"))
+			return
+		}
+		if !sameOriginOrNoOrigin(r) {
+			fail(w, http.StatusForbidden, fmt.Errorf("connection requests must be same-origin"))
+			return
+		}
+		if !bridgeJSONRequest(r) {
+			fail(w, http.StatusUnsupportedMediaType, fmt.Errorf("connection requests require application/json"))
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		var req connection.StartRequest
+		if err := decode(r, &req); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		var out connection.StartResult
+		var err error
+		callbackBase := r.Host
+		if path == "mastodon/start" {
+			out, err = s.Connections.StartMastodon(r.Context(), req, callbackBase)
+		} else {
+			out, err = s.Connections.StartMisskey(r.Context(), req, callbackBase)
+		}
+		if err != nil {
+			fail(w, 400, err)
+			return
+		}
+		writeJSON(w, 200, out)
+		return
+	}
+	if path == "mastodon/callback" {
+		if r.Method != http.MethodGet {
+			fail(w, 405, fmt.Errorf("method not allowed"))
+			return
+		}
+		if !localRequestHost(r.Host) {
+			fail(w, 400, fmt.Errorf("callback must use a loopback host"))
+			return
+		}
+		_, err := s.Connections.CallbackMastodon(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"))
+		if err != nil {
+			fail(w, 400, err)
+			return
+		}
+		http.Redirect(w, r, "/?connection=mastodon", http.StatusFound)
+		return
+	}
+	if path == "misskey/callback" {
+		if r.Method != http.MethodGet {
+			fail(w, 405, fmt.Errorf("method not allowed"))
+			return
+		}
+		if !localRequestHost(r.Host) {
+			fail(w, 400, fmt.Errorf("callback must use a loopback host"))
+			return
+		}
+		_, err := s.Connections.CallbackMisskey(r.Context(), r.URL.Query().Get("session"))
+		if err != nil {
+			fail(w, 400, err)
+			return
+		}
+		http.Redirect(w, r, "/?connection=misskey", http.StatusFound)
+		return
+	}
+	fail(w, 404, fmt.Errorf("unknown connection route"))
+}
+func localRequestHost(host string) bool {
+	h := host
+	if parsed, _, err := net.SplitHostPort(host); err == nil {
+		h = parsed
+	}
+	h = strings.Trim(h, "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 func (s *Server) topic(w http.ResponseWriter, r *http.Request, id string) {
 	if !strings.HasSuffix(r.URL.Path, "/draft") {

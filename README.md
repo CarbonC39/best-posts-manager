@@ -9,7 +9,7 @@ Best Post Manager 是一个单用户、本地运行的社交平台发帖工作�
 - 发布图片，并按平台能力处理 Markdown、MFM、emoji 和预览。
 - 通过官方 API/SDK 连接 Fediverse（Mastodon-compatible 与 Misskey）和 Bluesky。
 - 通过本地浏览器桥接连接 X、微博、小红书和 QQ 空间；浏览器脚本在用户已登录且当前可见的页面中工作。
-- 使用 Google Cloud Translation v3、DeepL v2 或 OpenAI Responses-compatible provider 翻译内容；译文总是生成新的 detached Variant。
+- 使用 Google Cloud Translation v3、DeepL v2、OpenAI Responses-compatible 或非官方 `google-gtx` provider 翻译内容；译文总是生成新的 detached Variant。`google-gtx` 是无凭据的非官方接口，单次最多 5000 Unicode 字符，可能随时失效。
 
 ## 站外帖子关联
 
@@ -80,9 +80,11 @@ Go 支持的平台可以通过 `GOOS`、`GOARCH` 交叉编译；Windows 目标�
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o build/bpm.exe ./cmd/bpm
 ```
 
-Mastodon-compatible Account 只保存 token 环境变量名，不把 token 写入 SQLite；发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。节点 1 使用这一最小方案，后续再接操作系统 keychain。
+Mastodon-compatible Account 手动配置时只保存 token 环境变量名，不把 token 写入 SQLite；发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。设置页也提供 Mastodon OAuth 和 Misskey MiAuth 自动连接：授权回调只在回环服务上接收，access token 写入数据目录下权限受限的 `credentials.json`，SQLite/API/备份只保存不透明引用。该文件不应加入版本库或手工备份。
 
-节点 2 的账号仍只保存环境变量名：Misskey 的 `token_env` 指向 access token，`base_url` 是实例地址；Bluesky 的 `remote_id` 是 handle/identifier，`base_url` 是 PDS 地址，`token_env` 指向 app password。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：
+OAuth 连接要求通过回环地址打开 WebUI。Mastodon 会先发现实例是否支持 `write:statuses`/`write:media`，旧实例回退到兼容的 `write` scope；Misskey 请求 `write:notes,write:drive`。OAuth state、MiAuth session 和 client secret 只保存在进程内短期状态，失败或过期不会创建半成账号。若不使用自动连接，仍可按下文用环境变量配置。
+
+手动添加账号时仍只保存环境变量名：Misskey 的 `token_env` 指向 access token，`base_url` 是实例地址；Bluesky 的 `remote_id` 是 handle/identifier，`base_url` 是 PDS 地址，`token_env` 指向 app password。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：
 
 ```sh
 export MISSKEY_TOKEN=...
@@ -108,7 +110,7 @@ BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm account add <profile-id> qzone qzone-
 
 ### 节点 4：翻译、恢复与备份
 
-翻译配置只保存 provider、地址、模型/项目和环境变量名，不保存 token、API key 或会话。凭据示例：
+翻译配置只保存 provider、地址、模型/项目，以及环境变量名或不透明本地凭据引用，不把 token、API key 或会话写入 SQLite。凭据示例：
 
 ```sh
 export OPENAI_TRANSLATION_KEY=...
@@ -116,7 +118,7 @@ BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm translation-config add openai OPENAI_
 BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm translate <source-variant> <target-account> zh <config-id> [source-language]
 ```
 
-也支持 `google`（凭据环境变量名 + base URL + project id）和 `deepl`（key 环境变量名 + base URL）。CLI 与 WebUI 都会明确显示译文是新的 detached 版本；provider 鉴权、限流、网络和协议错误不会把原文改掉。当前凭据最小方案是环境变量引用，程序不会把环境变量值写入数据库、日志、API 响应或备份；操作系统 keychain 尚未作为默认依赖引入。
+也支持 `google`（凭据环境变量名 + base URL + project id）和 `deepl`（key 环境变量名 + base URL）。`google-gtx` 可用 `bpm translation-config add google-gtx [base-url]` 创建，不需要 key，但属于非官方接口且限制 5000 Unicode 字符。CLI 与 WebUI 都会明确显示译文是新的 detached 版本；provider 鉴权、限流、网络和协议错误不会把原文改掉。凭据文件采用 0700 目录、0600 文件和原子替换；环境变量仍是可选 fallback。程序不会把环境变量值或凭据文件内容写入数据库、日志、API 响应或普通备份。
 
 离线备份包含 SQLite 一致快照、本地图片和版本/校验清单，不包含环境变量值：
 

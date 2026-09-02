@@ -6,19 +6,31 @@ import (
 	"time"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/credential"
 	"best-post-manager/internal/platform"
 	"best-post-manager/internal/translation"
 )
 
 type Service struct {
-	Store    *app.Store
-	Mastodon *platform.Client
-	Misskey  *platform.MisskeyClient
-	Bluesky  *platform.BlueskyClient
+	Store       *app.Store
+	Mastodon    *platform.Client
+	Misskey     *platform.MisskeyClient
+	Bluesky     *platform.BlueskyClient
+	Credentials credential.Store
 }
 
 func New(s *app.Store) *Service {
-	return &Service{Store: s, Mastodon: platform.NewClient(), Misskey: platform.NewMisskeyClient(), Bluesky: platform.NewBlueskyClient()}
+	var secrets credential.Store
+	if local, err := credential.NewFileStore(s.DataDir); err == nil {
+		secrets = local
+	}
+	mastodon := platform.NewClient()
+	mastodon.Credentials = secrets
+	misskey := platform.NewMisskeyClient()
+	misskey.Credentials = secrets
+	bluesky := platform.NewBlueskyClient()
+	bluesky.Credentials = secrets
+	return &Service{Store: s, Mastodon: mastodon, Misskey: misskey, Bluesky: bluesky, Credentials: secrets}
 }
 
 type TranslationRequest struct {
@@ -54,6 +66,9 @@ func (s *Service) Translate(ctx context.Context, req TranslationRequest) (app.Va
 	provider, err := translation.NewProvider(config)
 	if err != nil {
 		return app.Variant{}, app.Translation{}, err
+	}
+	if httpProvider, ok := provider.(*translation.HTTPProvider); ok {
+		httpProvider.Credentials = s.Credentials
 	}
 	sourceLanguage := req.SourceLanguage
 	if sourceLanguage == "" {
