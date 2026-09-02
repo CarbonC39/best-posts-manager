@@ -7,6 +7,7 @@ import (
 
 	"best-post-manager/internal/app"
 	"best-post-manager/internal/platform"
+	"best-post-manager/internal/translation"
 )
 
 type Service struct {
@@ -18,6 +19,53 @@ type Service struct {
 
 func New(s *app.Store) *Service {
 	return &Service{Store: s, Mastodon: platform.NewClient(), Misskey: platform.NewMisskeyClient(), Bluesky: platform.NewBlueskyClient()}
+}
+
+type TranslationRequest struct {
+	SourceVariantID string
+	TargetAccountID string
+	SourceLanguage  string
+	TargetLanguage  string
+	ConfigID        string
+}
+
+// Translate never edits the source. The provider call happens before the
+// transaction that creates the detached target Variant and its audit record.
+func (s *Service) Translate(ctx context.Context, req TranslationRequest) (app.Variant, app.Translation, error) {
+	source, err := s.Store.GetVariant(ctx, req.SourceVariantID)
+	if err != nil {
+		return app.Variant{}, app.Translation{}, err
+	}
+	target, err := s.Store.GetAccount(ctx, req.TargetAccountID)
+	if err != nil {
+		return app.Variant{}, app.Translation{}, err
+	}
+	sourceAccount, err := s.Store.GetAccount(ctx, source.AccountID)
+	if err != nil {
+		return app.Variant{}, app.Translation{}, err
+	}
+	if sourceAccount.ProfileID != target.ProfileID {
+		return app.Variant{}, app.Translation{}, errors.New("translation target account must belong to the source profile")
+	}
+	config, err := s.Store.GetTranslationConfig(ctx, req.ConfigID)
+	if err != nil {
+		return app.Variant{}, app.Translation{}, err
+	}
+	provider, err := translation.NewProvider(config)
+	if err != nil {
+		return app.Variant{}, app.Translation{}, err
+	}
+	sourceLanguage := req.SourceLanguage
+	if sourceLanguage == "" {
+		if draft, draftErr := s.Store.GetBaseDraft(ctx, source.TopicID); draftErr == nil {
+			sourceLanguage = draft.Language
+		}
+	}
+	translated, err := provider.Translate(ctx, translation.Request{Text: source.Text, SourceLanguage: sourceLanguage, TargetLanguage: req.TargetLanguage})
+	if err != nil {
+		return app.Variant{}, app.Translation{}, err
+	}
+	return s.Store.CreateTranslatedVariant(ctx, source, target, translated, config.Provider, sourceLanguage, req.TargetLanguage)
 }
 
 func (s *Service) Publish(ctx context.Context, variantID string) (app.Publication, error) {

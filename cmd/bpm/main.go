@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"best-post-manager/internal/app"
+	"best-post-manager/internal/backup"
 	"best-post-manager/internal/bridge"
 	"best-post-manager/internal/httpapi"
 	"best-post-manager/internal/service"
@@ -81,12 +82,72 @@ func main() {
 		}
 		post, e := svc.ImportExternal(ctx, os.Args[2], os.Args[3], os.Args[4])
 		printResult(post, e)
+	case "translation-config":
+		translationConfig(ctx, store, os.Args[2:])
+	case "translate":
+		if len(os.Args) < 6 {
+			fatal(fmt.Errorf("translate requires source-variant target-account target-language config-id"))
+		}
+		sourceLanguage := ""
+		if len(os.Args) > 6 {
+			sourceLanguage = os.Args[6]
+		}
+		v, record, e := svc.Translate(ctx, service.TranslationRequest{SourceVariantID: os.Args[2], TargetAccountID: os.Args[3], SourceLanguage: sourceLanguage, TargetLanguage: os.Args[4], ConfigID: os.Args[5]})
+		printResult(map[string]any{"variant": v, "translation": record}, e)
+	case "backup":
+		backupCommand(ctx, store, os.Args[2:])
 	default:
 		usage()
 	}
 }
 func usage() {
-	fmt.Println("bpm serve [-addr 127.0.0.1:8787]\nbpm profile add <name> | list\nbpm account add <profile-id> <platform> <name> [base-url] [token-env] [remote-id] | list [profile-id]\nbpm topic add <profile-id> <title> | list [profile-id]\nbpm draft show|set <topic-id> [text]\nbpm variant add|show|edit|apply|list ...\nbpm media add|list <topic-id> [file] [variant-id]\nbpm publish <variant-id> | retry <publication-id>\nbpm history\nbpm import <topic-id> <account-id> <URL-or-remote-id>\nbpm external mark|list <topic-id> <platform> <url> [remote-id]")
+	fmt.Println("bpm serve [-addr 127.0.0.1:8787]\nbpm profile add <name> | list\nbpm account add <profile-id> <platform> <name> [base-url] [token-env] [remote-id] | list [profile-id]\nbpm topic add <profile-id> <title> | list [profile-id]\nbpm draft show|set <topic-id> [text]\nbpm variant add|show|edit|apply|list ...\nbpm media add|list <topic-id> [file] [variant-id]\nbpm publish <variant-id> | retry <publication-id>\nbpm history\nbpm import <topic-id> <account-id> <URL-or-remote-id>\nbpm external mark|list <topic-id> <platform> <url> [remote-id]\nbpm translation-config add <provider> <token-or-key-env> [base-url] [project-or-model] | list\nbpm translate <source-variant> <target-account> <target-language> <config-id> [source-language]\nbpm backup create <archive.zip> | restore <archive.zip> <empty-directory>")
+}
+
+func translationConfig(ctx context.Context, s *app.Store, args []string) {
+	if len(args) > 0 && args[0] == "list" {
+		v, e := s.ListTranslationConfigs(ctx)
+		printResult(v, e)
+		return
+	}
+	if len(args) < 3 || args[0] != "add" {
+		fatal(fmt.Errorf("translation-config add requires provider token-or-key-env [base-url] [project-or-model]"))
+	}
+	c := app.TranslationConfig{Provider: args[1]}
+	if c.Provider == "deepl" {
+		c.KeyEnv = args[2]
+	} else {
+		c.TokenEnv = args[2]
+	}
+	if len(args) > 3 {
+		c.BaseURL = args[3]
+	}
+	if len(args) > 4 {
+		if c.Provider == "google" || c.Provider == "google-cloud" {
+			c.ProjectID = args[4]
+		} else {
+			c.Model = args[4]
+		}
+	}
+	v, e := s.CreateTranslationConfig(ctx, c)
+	printResult(v, e)
+}
+
+func backupCommand(ctx context.Context, s *app.Store, args []string) {
+	if len(args) < 2 {
+		fatal(fmt.Errorf("backup create <archive.zip> | restore <archive.zip> <empty-directory>"))
+	}
+	switch args[0] {
+	case "create":
+		printResult(map[string]string{"archive": args[1]}, backup.Create(ctx, s.DataDir, args[1]))
+	case "restore":
+		if len(args) < 3 {
+			fatal(fmt.Errorf("backup restore requires archive and empty directory"))
+		}
+		printResult(map[string]string{"directory": args[2]}, backup.Restore(ctx, args[1], args[2]))
+	default:
+		fatal(fmt.Errorf("unknown backup command"))
+	}
 }
 func serve(svc *service.Service, args []string) {
 	f := flag.NewFlagSet("serve", flag.ExitOnError)

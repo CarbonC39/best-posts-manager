@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestV1DatabaseMigratesToV4WithoutDataLoss(t *testing.T) {
+func TestV1DatabaseMigratesToV5WithoutDataLoss(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
 	if err != nil {
@@ -32,7 +32,7 @@ func TestV1DatabaseMigratesToV4WithoutDataLoss(t *testing.T) {
 		t.Fatalf("unexpected migrated local_only: %d", local)
 	}
 	var version int
-	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	var cid string
@@ -46,5 +46,41 @@ func TestV1DatabaseMigratesToV4WithoutDataLoss(t *testing.T) {
 	var mediaJSON string
 	if err = st.DB.QueryRow(`SELECT media_snapshot FROM external_posts WHERE id='e1'`).Scan(&mediaJSON); err != nil || mediaJSON != "[]" {
 		t.Fatalf("external snapshot migration failed: %q %v", mediaJSON, err)
+	}
+}
+
+func TestV5MigrationFailureRollsBackVersion(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(4); CREATE TRIGGER block_v5 BEFORE INSERT ON schema_migrations WHEN NEW.version=5 BEGIN SELECT RAISE(ABORT,'block v5'); END; CREATE TABLE profiles(id TEXT PRIMARY KEY, name TEXT NOT NULL, default_language TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL); INSERT INTO profiles VALUES('p','preserved','','','now');`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(context.Background(), dir); err == nil {
+		t.Fatal("migration should fail when a conflicting object blocks v5")
+	}
+	check, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version int
+	if err = check.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+		t.Fatalf("failed migration advanced version: %d %v", version, err)
+	}
+	var name string
+	if err = check.QueryRow(`SELECT name FROM profiles WHERE id='p'`).Scan(&name); err != nil || name != "preserved" {
+		t.Fatalf("failed migration damaged existing data: %q %v", name, err)
+	}
+	var tables int
+	if err = check.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('translation_configs','translations')`).Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("failed migration left partial tables: count=%d err=%v", tables, err)
 	}
 }

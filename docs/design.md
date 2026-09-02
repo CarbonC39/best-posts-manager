@@ -118,6 +118,10 @@ ExternalPost 有两种有意不同的模式：
 
 翻译是显式的应用操作：用户选择源语言、目标语言、provider 和要翻译的 Variant/文本范围，结果创建新的 Variant 或草稿，不覆盖原文。Provider 接口只需提交文本和语言、返回译文及 provider 元数据；Google Translate、DeepL、OpenAI-compatible 实现可替换。密钥走凭据存储，失败保留原文并展示可重试原因。翻译结果发布前仍须经过平台能力校验和用户确认。
 
+节点 4 的最小实现为 `TranslationConfig` + `Translation`：配置只保存 provider、可覆盖的 base URL、Google project/location、OpenAI model 和 `TokenEnv`/`KeyEnv` 环境变量名；环境变量值只在一次 HTTP 请求期间读取。Google 使用 Cloud Translation v3 `projects/{project}:translateText` 和 Bearer，DeepL 使用 `/v2/translate` 与 `DeepL-Auth-Key`，OpenAI-compatible 使用 `/v1/responses`、`store:false`，兼容顶层 `output_text` 和标准 output content。base URL 可替换为本地 fixture，便于不接触真实服务的 contract 测试。
+
+应用层先完成 provider 请求，成功后在一个 SQLite 事务中创建目标 Variant（`detached`）和可追溯 Translation 记录；失败时不创建目标版本。源 Variant、目标 Account、目标语言和 provider/config ID 都由用户明确选择，目标平台仍按自己的 capability 校验。当前凭据方案是环境变量引用，未把 keychain 引入依赖；因此 UI、CLI、日志和备份都只显示引用名，并提示用户自行保护环境。
+
 ## WebUI 与 CLI
 
 WebUI 使用 Vue 3 + TypeScript，简约扁平布局和侧边栏；Topic 页面应能看见基础稿、各 Variant 的来源/状态、媒体预览、发布历史和外部关联。编辑保存采用明确的保存动作或可靠的本地自动保存，不把未确认的发布混入编辑。
@@ -128,9 +132,13 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 网络、鉴权、能力校验、媒体上传和平台限流要分类记录。只有明确可安全重试的错误才提供“重试”操作；鉴权失败先要求更新 Account。发布请求生成本地幂等键并记录远端结果，超时后重试前提示用户检查平台，避免重复发帖。浏览器桥接超时不能推断“未发布”，应保持 `needs_confirmation` 并允许用户用 URL 标记成功结果。
 
+启动时会把遗留的 `publishing` Publication 变为 `needs_confirmation`，并写入“请到平台确认、不要盲目重试”的可行动错误；不会自动重新发帖。Retry 只接受 `status=failed` 且 `error_category=retryable` 的记录，鉴权、校验、未知结果和 `needs_confirmation` 都必须先由用户处理。媒体上传阶段网络失败仍可重试，最终提交请求超时则结果未知。
+
 ## 备份与恢复
 
 提供导出 SQLite 数据、媒体文件和不含凭据的清单的备份命令；恢复前校验版本、校验值和迁移状态，避免覆盖当前数据。备份应能在本地离线完成。凭据单独重新配置，不把 token 混入普通备份。数据库迁移要可检测失败并保留原文件，发布历史是不可丢失的审计线索。
+
+节点 4 使用标准库 ZIP：`bpm backup create archive.zip` 先用 SQLite `VACUUM INTO` 生成一致快照，再收集 `media/` 和 manifest（格式版本、schema 版本、文件大小、SHA-256）。恢复先在临时目录验证所有路径、清单、校验和及 SQLite migration 状态，目标必须不存在或为空，验证成功后才重命名进入目标目录；非空目标和损坏归档都拒绝。归档中没有环境变量值或 token。v5 migration 在单独事务中建立翻译配置/记录表并写入版本号，失败会 rollback，不推进 migration 版本。
 
 ## 明确排除项
 

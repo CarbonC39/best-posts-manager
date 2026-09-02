@@ -261,6 +261,54 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 201, v)
 		}
 		return
+	case path == "translation-configs" && r.Method == http.MethodGet:
+		v, e := s.Svc.Store.ListTranslationConfigs(ctx)
+		if e != nil {
+			fail(w, 500, e)
+		} else {
+			writeJSON(w, 200, v)
+		}
+		return
+	case path == "translation-configs" && r.Method == http.MethodPost:
+		var v app.TranslationConfig
+		if e := decode(r, &v); e != nil {
+			fail(w, 400, e)
+			return
+		}
+		v, e := s.Svc.Store.CreateTranslationConfig(ctx, v)
+		if e != nil {
+			fail(w, 400, e)
+		} else {
+			writeJSON(w, 201, v)
+		}
+		return
+	case path == "translations" && r.Method == http.MethodGet:
+		v, e := s.Svc.Store.ListTranslations(ctx)
+		if e != nil {
+			fail(w, 500, e)
+		} else {
+			writeJSON(w, 200, v)
+		}
+		return
+	case path == "translations" && r.Method == http.MethodPost:
+		var req struct {
+			SourceVariantID string `json:"source_variant_id"`
+			TargetAccountID string `json:"target_account_id"`
+			SourceLanguage  string `json:"source_language"`
+			TargetLanguage  string `json:"target_language"`
+			ConfigID        string `json:"config_id"`
+		}
+		if e := decode(r, &req); e != nil {
+			fail(w, 400, e)
+			return
+		}
+		v, record, e := s.Svc.Translate(ctx, service.TranslationRequest{SourceVariantID: req.SourceVariantID, TargetAccountID: req.TargetAccountID, SourceLanguage: req.SourceLanguage, TargetLanguage: req.TargetLanguage, ConfigID: req.ConfigID})
+		if e != nil {
+			fail(w, 400, e)
+		} else {
+			writeJSON(w, 201, map[string]any{"variant": v, "translation": record})
+		}
+		return
 	case strings.HasPrefix(path, "topics/"):
 		s.topic(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "topics/"), "/draft"))
 		return

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var credentialEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Store struct {
 	DB                *sql.DB
@@ -38,6 +40,10 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{DB: db, DataDir: dataDir, MediaDir: media}
 	if err := s.Migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.RecoverPublishing(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -98,7 +104,39 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 			return err
 		}
 	}
+	if version < 5 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, txErr = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS translation_configs (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', token_env TEXT NOT NULL DEFAULT '', key_env TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS translations (id TEXT PRIMARY KEY, source_variant_id TEXT NOT NULL REFERENCES variants(id), target_account_id TEXT NOT NULL REFERENCES accounts(id), target_variant_id TEXT NOT NULL REFERENCES variants(id), source_language TEXT NOT NULL DEFAULT '', target_language TEXT NOT NULL, provider TEXT NOT NULL, status TEXT NOT NULL, error_category TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(5)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
 	return nil
+}
+
+// RecoverPublishing makes an interrupted final publish visible to the user.
+// It deliberately never retries: the remote outcome may already be successful.
+func (s *Store) RecoverPublishing(ctx context.Context) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='needs_confirmation', error_category='unknown', error_message='程序重启时发布请求仍在进行；请到平台确认结果后再手动关联，勿盲目重试' WHERE status='publishing'`)
+	return err
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -694,6 +732,113 @@ func (s *Store) ListExternalPosts(ctx context.Context, topicID string) ([]Extern
 		p.Incomplete = incomplete != 0
 		p.CreatedAt = parseTime(t)
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateTranslationConfig(ctx context.Context, c TranslationConfig) (TranslationConfig, error) {
+	if c.ID == "" {
+		c.ID = id()
+	}
+	if c.CreatedAt.IsZero() {
+		c.CreatedAt = time.Now().UTC()
+	}
+	switch c.Provider {
+	case "google", "google-cloud", "openai", "openai-compatible":
+		c.TokenEnv = strings.TrimSpace(c.TokenEnv)
+		c.KeyEnv = ""
+		if !credentialEnvName.MatchString(c.TokenEnv) {
+			return c, fmt.Errorf("token_env must be an environment variable name, not a credential value")
+		}
+	case "deepl":
+		c.KeyEnv = strings.TrimSpace(c.KeyEnv)
+		c.TokenEnv = ""
+		if !credentialEnvName.MatchString(c.KeyEnv) {
+			return c, fmt.Errorf("key_env must be an environment variable name, not a credential value")
+		}
+	default:
+		return c, fmt.Errorf("unsupported translation provider %q", c.Provider)
+	}
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO translation_configs(id,provider,base_url,project_id,location,token_env,key_env,model,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, c.ID, c.Provider, c.BaseURL, c.ProjectID, c.Location, c.TokenEnv, c.KeyEnv, c.Model, c.CreatedAt.Format(time.RFC3339Nano))
+	return c, err
+}
+
+func (s *Store) ListTranslationConfigs(ctx context.Context) ([]TranslationConfig, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,provider,base_url,project_id,location,token_env,key_env,model,created_at FROM translation_configs ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TranslationConfig
+	for rows.Next() {
+		var c TranslationConfig
+		var created string
+		if err := rows.Scan(&c.ID, &c.Provider, &c.BaseURL, &c.ProjectID, &c.Location, &c.TokenEnv, &c.KeyEnv, &c.Model, &created); err != nil {
+			return nil, err
+		}
+		c.CreatedAt = parseTime(created)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetTranslationConfig(ctx context.Context, id string) (TranslationConfig, error) {
+	var c TranslationConfig
+	var created string
+	err := s.DB.QueryRowContext(ctx, `SELECT id,provider,base_url,project_id,location,token_env,key_env,model,created_at FROM translation_configs WHERE id=?`, id).Scan(&c.ID, &c.Provider, &c.BaseURL, &c.ProjectID, &c.Location, &c.TokenEnv, &c.KeyEnv, &c.Model, &created)
+	if err == sql.ErrNoRows {
+		err = ErrNotFound
+	}
+	c.CreatedAt = parseTime(created)
+	return c, err
+}
+
+func (s *Store) CreateTranslatedVariant(ctx context.Context, source Variant, target Account, text, provider, sourceLanguage, targetLanguage string) (Variant, Translation, error) {
+	if source.TopicID == "" || target.ID == "" || strings.TrimSpace(targetLanguage) == "" {
+		return Variant{}, Translation{}, fmt.Errorf("source, target account and target language are required")
+	}
+	if !s.accountTopicOK(ctx, source.TopicID, target.ID) {
+		return Variant{}, Translation{}, ErrNotFound
+	}
+	created := time.Now().UTC()
+	v := Variant{ID: id(), TopicID: source.TopicID, AccountID: target.ID, Text: text, Format: source.Format, Status: "draft", Relation: "detached", CreatedAt: created, UpdatedAt: created}
+	normalizeVariantForPlatform(&v, target.Platform)
+	if target.Platform == "misskey" {
+		v.Format = "mfm"
+	}
+	t := Translation{ID: id(), SourceVariantID: source.ID, TargetAccountID: target.ID, TargetVariantID: v.ID, SourceLanguage: sourceLanguage, TargetLanguage: targetLanguage, Provider: provider, Status: "succeeded", CreatedAt: created}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Variant{}, Translation{}, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO variants(id,topic_id,account_id,text,format,status,relation,source_revision,visibility,spoiler_text,local_only,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.TopicID, v.AccountID, v.Text, v.Format, v.Status, v.Relation, "", v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), created.Format(time.RFC3339Nano), created.Format(time.RFC3339Nano)); err != nil {
+		return Variant{}, Translation{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO translations(id,source_variant_id,target_account_id,target_variant_id,source_language,target_language,provider,status,error_category,error_message,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.SourceVariantID, t.TargetAccountID, t.TargetVariantID, t.SourceLanguage, t.TargetLanguage, t.Provider, t.Status, "", "", created.Format(time.RFC3339Nano)); err != nil {
+		return Variant{}, Translation{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Variant{}, Translation{}, err
+	}
+	return v, t, nil
+}
+
+func (s *Store) ListTranslations(ctx context.Context) ([]Translation, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,source_variant_id,target_account_id,target_variant_id,source_language,target_language,provider,status,error_category,error_message,created_at FROM translations ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Translation
+	for rows.Next() {
+		var t Translation
+		var created string
+		if err := rows.Scan(&t.ID, &t.SourceVariantID, &t.TargetAccountID, &t.TargetVariantID, &t.SourceLanguage, &t.TargetLanguage, &t.Provider, &t.Status, &t.ErrorCategory, &t.ErrorMessage, &created); err != nil {
+			return nil, err
+		}
+		t.CreatedAt = parseTime(created)
+		out = append(out, t)
 	}
 	return out, rows.Err()
 }

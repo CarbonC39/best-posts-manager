@@ -197,6 +197,75 @@ func TestOfficialImportDispatchesWithoutWebScrapeFallback(t *testing.T) {
 	}
 }
 
+func TestTranslateCreatesTraceableDetachedVariantWithoutChangingSource(t *testing.T) {
+	t.Setenv("TRANSLATE_TOKEN", "secret")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"output_text": "translated"})
+	}))
+	defer ts.Close()
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	sourceAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "mastodon", Name: "source"})
+	targetAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "mastodon", Name: "target"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p.ID, Title: "translation"})
+	_, _ = st.UpdateBaseDraft(ctx, app.BaseDraft{TopicID: topic.ID, Text: "original", Language: "en"})
+	source, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: sourceAccount.ID}, "")
+	config, err := st.CreateTranslationConfig(ctx, app.TranslationConfig{Provider: "openai", BaseURL: ts.URL, TokenEnv: "TRANSLATE_TOKEN", Model: "fake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	variant, record, err := New(st).Translate(ctx, TranslationRequest{SourceVariantID: source.ID, TargetAccountID: targetAccount.ID, TargetLanguage: "zh", ConfigID: config.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if variant.Text != "translated" || variant.Relation != "detached" || record.TargetVariantID != variant.ID || record.Status != "succeeded" {
+		t.Fatalf("unexpected translation result: %+v %+v", variant, record)
+	}
+	unchanged, _ := st.GetVariant(ctx, source.ID)
+	if unchanged.Text != source.Text || unchanged.ID == variant.ID {
+		t.Fatalf("source variant was changed: %+v", unchanged)
+	}
+	if records, err := st.ListTranslations(ctx); err != nil || len(records) != 1 {
+		t.Fatalf("translation record was not persisted: %v %v", records, err)
+	}
+}
+
+func TestTranslateProviderFailureDoesNotCreateVariantOrRecord(t *testing.T) {
+	t.Setenv("TRANSLATE_TOKEN", "secret")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []any{}})
+	}))
+	defer ts.Close()
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	a, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "mastodon", Name: "a"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p.ID, Title: "translation failure"})
+	source, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: a.ID}, "")
+	config, _ := st.CreateTranslationConfig(ctx, app.TranslationConfig{Provider: "openai", BaseURL: ts.URL, TokenEnv: "TRANSLATE_TOKEN"})
+	if _, _, err = New(st).Translate(ctx, TranslationRequest{SourceVariantID: source.ID, TargetAccountID: a.ID, TargetLanguage: "zh", ConfigID: config.ID}); err == nil {
+		t.Fatal("partial provider response must fail")
+	}
+	variants, variantsErr := st.ListVariants(ctx, topic.ID)
+	records, recordsErr := st.ListTranslations(ctx)
+	if variantsErr != nil || recordsErr != nil || len(variants) != 1 || len(records) != 0 {
+		t.Fatalf("failed translation changed local state: variants=%d records=%d errors=%v/%v", len(variants), len(records), variantsErr, recordsErr)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

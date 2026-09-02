@@ -101,3 +101,31 @@ type ExternalMedia struct {
 	AltText  string `json:"alt_text"`
 	Size     int64  `json:"size"`
 }
+
+// TranslationConfig contains provider configuration, never a provider secret.
+// TokenEnv/KeyEnv are names of environment variables read only at operation time.
+type TranslationConfig struct {
+	ID        string    `json:"id"`
+	Provider  string    `json:"provider"`
+	BaseURL   string    `json:"base_url"`
+	ProjectID string    `json:"project_id"`
+	Location  string    `json:"location"`
+	TokenEnv  string    `json:"token_env"`
+	KeyEnv    string    `json:"key_env"`
+	Model     string    `json:"model"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Translation struct {
+	ID              string    `json:"id"`
+	SourceVariantID string    `json:"source_variant_id"`
+	TargetAccountID string    `json:"target_account_id"`
+	TargetVariantID string    `json:"target_variant_id"`
+	SourceLanguage  string    `json:"source_language"`
+	TargetLanguage  string    `json:"target_language"`
+	Provider        string    `json:"provider"`
+	Status          string    `json:"status"`
+	ErrorCategory   string    `json:"error_category"`
+	ErrorMessage    string    `json:"error_message"`
+	CreatedAt       time.Time `json:"created_at"`
+}

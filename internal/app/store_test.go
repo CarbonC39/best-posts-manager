@@ -192,3 +192,54 @@ func TestVariantRulesFollowTargetPlatform(t *testing.T) {
 		t.Fatalf("Bluesky copy was not normalized: %+v", bsky)
 	}
 }
+
+func TestRestartRecoversInterruptedPublishingWithoutRetry(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	a, _ := store.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "mastodon", Name: "a"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: p.ID, Title: "recovery"})
+	v, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: a.ID}, "")
+	publication, err := store.CreatePublication(ctx, Publication{VariantID: v.ID, AccountID: a.ID, Status: "publishing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.GetPublication(ctx, publication.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "needs_confirmation" || got.ErrorCategory != "unknown" || got.ErrorMessage == "" {
+		t.Fatalf("interrupted publication was not recovered: %+v", got)
+	}
+}
+
+func TestTranslationConfigStoresOnlyCredentialReferences(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err = store.CreateTranslationConfig(ctx, TranslationConfig{Provider: "openai", TokenEnv: "sk-secret-value"}); err == nil {
+		t.Fatal("a credential value must not be accepted as an environment variable reference")
+	}
+	config, err := store.CreateTranslationConfig(ctx, TranslationConfig{Provider: "openai", TokenEnv: "OPENAI_TRANSLATION_KEY", KeyEnv: "ignored"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.TokenEnv != "OPENAI_TRANSLATION_KEY" || config.KeyEnv != "" {
+		t.Fatalf("unexpected persisted credential references: %+v", config)
+	}
+}

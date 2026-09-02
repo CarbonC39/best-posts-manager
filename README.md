@@ -9,7 +9,7 @@ Best Post Manager 是一个单用户、本地运行的社交平台发帖工作�
 - 发布图片，并按平台能力处理 Markdown、MFM、emoji 和预览。
 - 通过官方 API/SDK 连接 Fediverse（Mastodon-compatible 与 Misskey）和 Bluesky。
 - 通过本地浏览器桥接连接 X、微博、小红书和 QQ 空间；浏览器脚本在用户已登录且当前可见的页面中工作。
-- 使用 Google Translate、DeepL 或 OpenAI-compatible provider 翻译内容（属于后续节点）。
+- 使用 Google Cloud Translation v3、DeepL v2 或 OpenAI Responses-compatible provider 翻译内容；译文总是生成新的 detached Variant。
 
 ## 站外帖子关联
 
@@ -41,7 +41,7 @@ Go 单体程序承载本地 API、应用层和嵌入的 Vue SPA；SQLite 保存�
 
 项目仍在设计和快速实现阶段，平台能力以各适配器的实际支持范围为准。
 
-## 本地运行（节点 1–3）
+## 本地运行（节点 1–4）
 
 需要 Go 1.23+。默认数据目录位于操作系统用户配置目录下的 `best-post-manager`，也可以用 `BPM_DATA_DIR` 指定一个权限受限的本地目录：
 
@@ -82,3 +82,24 @@ X、微博、小红书和 QQ 空间账号只用于关联 Profile/Variant，`base
 ```sh
 BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm account add <profile-id> qzone qzone-main
 ```
+
+### 节点 4：翻译、恢复与备份
+
+翻译配置只保存 provider、地址、模型/项目和环境变量名，不保存 token、API key 或会话。凭据示例：
+
+```sh
+export OPENAI_TRANSLATION_KEY=...
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm translation-config add openai OPENAI_TRANSLATION_KEY https://api.openai.com gpt-4o-mini
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm translate <source-variant> <target-account> zh <config-id> [source-language]
+```
+
+也支持 `google`（凭据环境变量名 + base URL + project id）和 `deepl`（key 环境变量名 + base URL）。CLI 与 WebUI 都会明确显示译文是新的 detached 版本；provider 鉴权、限流、网络和协议错误不会把原文改掉。当前凭据最小方案是环境变量引用，程序不会把环境变量值写入数据库、日志、API 响应或备份；操作系统 keychain 尚未作为默认依赖引入。
+
+离线备份包含 SQLite 一致快照、本地图片和版本/校验清单，不包含环境变量值：
+
+```sh
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm backup create "$PWD/bpm-backup.zip"
+BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm backup restore "$PWD/bpm-backup.zip" "$PWD/empty-restore-dir"
+```
+
+恢复目标必须不存在或为空，程序会先校验清单、SHA-256、SQLite schema 和路径安全，再落盘，拒绝覆盖已有数据。若程序在最终发布期间重启，`publishing` 会变为 `needs_confirmation`；请先去平台确认，不要盲目重试。只有明确标记为 `retryable` 的失败才开放 retry。
