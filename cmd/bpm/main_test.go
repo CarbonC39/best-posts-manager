@@ -2,12 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestEmbeddedFrontendIsPresent(t *testing.T) {
+	data, err := fs.ReadFile(web, "dist/index.html")
+	if err != nil || len(data) == 0 {
+		t.Fatalf("embedded frontend missing: %v", err)
+	}
+}
 
 func TestCLIApplicationFlow(t *testing.T) {
 	dir := t.TempDir()

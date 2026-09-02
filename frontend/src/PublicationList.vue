@@ -2,8 +2,9 @@
 import { onMounted, ref } from 'vue'
 import { api } from './api'
 type Publication = { id:string; status:string; remote_url:string; remote_id:string; remote_cid:string; error_message:string; error_category:string }
+function listOrEmpty<T>(value: T[] | null | undefined): T[] { return Array.isArray(value) ? value : [] }
 const rows=ref<Publication[]>([]), message=ref('')
-async function load(){try{rows.value=await api<Publication[]>('publications')}catch(error){message.value=error instanceof Error?error.message:String(error)}}
+async function load(){try{rows.value=listOrEmpty(await api<Publication[]>('publications'))}catch(error){message.value=error instanceof Error?error.message:String(error)}}
 async function retry(publication:Publication){try{await api('publications/retry',{method:'POST',body:JSON.stringify({publication_id:publication.id})});message.value='重试完成';await load()}catch(error){message.value=`重试失败：${error instanceof Error?error.message:String(error)}`}}
 onMounted(load)
 </script>

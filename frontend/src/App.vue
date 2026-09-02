@@ -16,6 +16,8 @@ type BridgeRequest = { id: string; kind: string; status: string; error?: string;
 type Capability = { platform: string; format: string; text_max_bytes: number; max_media: number; max_media_bytes: number; visibilities: string[]; supports_cw: boolean; supports_local_only: boolean; custom_emoji: boolean; visibility_note?: string }
 type TranslationConfig = { id: string; provider: string; base_url: string; project_id: string; location: string; token_env: string; key_env: string; model: string }
 
+function listOrEmpty<T>(value: T[] | null | undefined): T[] { return Array.isArray(value) ? value : [] }
+
 const section = ref('topics')
 const profiles = ref<Profile[]>([])
 const accounts = ref<Account[]>([])
@@ -97,9 +99,9 @@ async function load() {
     const loaded = await Promise.all([
       api<Profile[]>('profiles'), api<Account[]>('accounts'), api<Topic[]>('topics'), api<BridgePairing[]>('bridge/pairings'), api<TranslationConfig[]>('translation-configs'),
     ] as const)
-    profiles.value = loaded[0]; accounts.value = loaded[1]; topics.value = loaded[2]
-    bridgePairings.value = loaded[3].map((pairing) => ({ ...existingPairings.get(pairing.id), ...pairing }))
-    translationConfigs.value = loaded[4]
+    profiles.value = listOrEmpty(loaded[0]); accounts.value = listOrEmpty(loaded[1]); topics.value = listOrEmpty(loaded[2])
+    bridgePairings.value = listOrEmpty(loaded[3]).map((pairing) => ({ ...existingPairings.get(pairing.id), ...pairing }))
+    translationConfigs.value = listOrEmpty(loaded[4])
     if (!translationConfigID.value) translationConfigID.value = translationConfigs.value[0]?.id || ''
     capabilities.value = Object.fromEntries(await Promise.all(accounts.value.map(async (account) => [account.id, await api<Capability>(`accounts/${account.id}/capability`)])))
     if (!selectedProfileID.value && profiles.value[0]) selectedProfileID.value = profiles.value[0].id
@@ -139,10 +141,11 @@ async function openTopic(topic: Topic) {
   try {
     selected.value = topic
     selectedProfileID.value = topic.profile_id
-    ;[draft.value, variants.value, media.value, externalPosts.value] = await Promise.all([
+    const loaded = await Promise.all([
       api<Draft>(`topics/${topic.id}/draft`), api<Variant[]>(`variants?topic_id=${topic.id}`),
       api<Media[]>(`media?topic_id=${topic.id}`), api<ExternalPost[]>(`external-posts?topic_id=${topic.id}`),
     ])
+    draft.value = loaded[0]; variants.value = listOrEmpty(loaded[1]); media.value = listOrEmpty(loaded[2]); externalPosts.value = listOrEmpty(loaded[3])
     text.value = draft.value.text
     mediaVariantID.value = variants.value[0]?.id || ''
     translationSourceID.value = variants.value[0]?.id || ''
@@ -155,7 +158,7 @@ async function saveDraft() {
   if (!selected.value) return
   try {
     draft.value = await api<Draft>(`topics/${selected.value.id}/draft`, { method: 'PUT', body: JSON.stringify({ text: text.value, format: 'plain', language: '' }) })
-    variants.value = await api<Variant[]>(`variants?topic_id=${selected.value.id}`)
+    variants.value = listOrEmpty(await api<Variant[]>(`variants?topic_id=${selected.value.id}`))
     message.value = '基础稿已保存'
   } catch (error) { showError(error) }
 }
@@ -164,7 +167,7 @@ async function newVariant() {
   if (!selected.value || !selectedAccountID.value) return
   try {
     await api('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: selectedAccountID.value }) })
-    variants.value = await api<Variant[]>(`variants?topic_id=${selected.value.id}`)
+    variants.value = listOrEmpty(await api<Variant[]>(`variants?topic_id=${selected.value.id}`))
     mediaVariantID.value ||= variants.value[0]?.id || ''
   } catch (error) { showError(error) }
 }
@@ -195,7 +198,7 @@ async function markExternal() {
   try {
     await api('external-posts', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: externalAccountID.value, platform: externalPlatform.value, url: externalURL.value }) })
     externalURL.value = ''
-    externalPosts.value = await api<ExternalPost[]>(`external-posts?topic_id=${selected.value.id}`)
+    externalPosts.value = listOrEmpty(await api<ExternalPost[]>(`external-posts?topic_id=${selected.value.id}`))
     message.value = '已标记站外 URL'
   } catch (error) { showError(error) }
 }
@@ -221,7 +224,7 @@ async function uploadMedia(event: Event) {
 async function loadEmoji() {
   if (!selectedAccountID.value) return
   try {
-    emojis.value = await api<Emoji[]>(`accounts/${selectedAccountID.value}/emojis`)
+    emojis.value = listOrEmpty(await api<Emoji[]>(`accounts/${selectedAccountID.value}/emojis`))
     message.value = `已加载 ${emojis.value.length} 个实例 emoji`
   } catch (error) { message.value = `emoji 加载失败：${error instanceof Error ? error.message : String(error)}` }
 }
@@ -261,9 +264,9 @@ async function translateVariant() {
 async function refreshBridgeState() {
   try {
     const existing = new Map(bridgePairings.value.map((pairing) => [pairing.id, pairing]))
-    bridgePairings.value = (await api<BridgePairing[]>('bridge/pairings')).map((pairing) => ({ ...existing.get(pairing.id), ...pairing }))
+    bridgePairings.value = listOrEmpty(await api<BridgePairing[]>('bridge/pairings')).map((pairing) => ({ ...existing.get(pairing.id), ...pairing }))
     if (bridgeRequest.value) bridgeRequest.value = await api<BridgeRequest>(`bridge/requests/${bridgeRequest.value.id}`)
-    if (selected.value) externalPosts.value = await api<ExternalPost[]>(`external-posts?topic_id=${selected.value.id}`)
+    if (selected.value) externalPosts.value = listOrEmpty(await api<ExternalPost[]>(`external-posts?topic_id=${selected.value.id}`))
     bridgeMessage.value = '桥接状态与站外快照已刷新'
   } catch (error) { showError(error) }
 }

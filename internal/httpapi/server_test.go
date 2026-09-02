@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,5 +137,29 @@ func TestCapabilityIsSelectedFromAccountPlatform(t *testing.T) {
 	}
 	if capability["platform"] != "bluesky" || capability["format"] != "plain" || capability["text_max_bytes"] != float64(3000) {
 		t.Fatalf("unexpected capability: %#v", capability)
+	}
+}
+
+func TestEmptyListResponsesAreJSONArrays(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	server := httptest.NewServer(&Server{Svc: service.New(st)})
+	defer server.Close()
+	paths := []string{"profiles", "accounts", "topics", "variants?topic_id=missing", "media?topic_id=missing", "publications", "external-posts?topic_id=missing", "translation-configs", "bridge/pairings"}
+	for _, path := range paths {
+		res, requestErr := http.Get(fmt.Sprintf("%s/api/%s", server.URL, path))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		var value []any
+		decodeErr := json.NewDecoder(res.Body).Decode(&value)
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusOK || decodeErr != nil || value == nil {
+			t.Errorf("%s: status=%d value=%#v decode=%v", path, res.StatusCode, value, decodeErr)
+		}
 	}
 }

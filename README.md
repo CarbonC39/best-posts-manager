@@ -57,6 +57,29 @@ BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm topic add <profile-id> "一个话题"
 BPM_DATA_DIR="$PWD/.data" go run ./cmd/bpm history
 ```
 
+### 构建单二进制
+
+单二进制会嵌入已经构建的 Vue WebUI，并使用纯 Go SQLite 驱动，不需要随包复制 `dist/`、Node.js 或动态 SQLite 库。安装依赖并构建当前系统版本：
+
+```sh
+mkdir -p build
+npm --prefix frontend ci
+npm --prefix frontend run build
+CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o build/bpm ./cmd/bpm
+```
+
+如果系统提供 `make`，以上命令等价于 `make build`。产物为 `build/bpm`，可以单独复制到其他目录运行：
+
+```sh
+BPM_DATA_DIR="$PWD/.data" ./build/bpm serve
+```
+
+Go 支持的平台可以通过 `GOOS`、`GOARCH` 交叉编译；Windows 目标需使用 `.exe` 文件名，例如：
+
+```sh
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o build/bpm.exe ./cmd/bpm
+```
+
 Mastodon-compatible Account 只保存 token 环境变量名，不把 token 写入 SQLite；发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。节点 1 使用这一最小方案，后续再接操作系统 keychain。
 
 节点 2 的账号仍只保存环境变量名：Misskey 的 `token_env` 指向 access token，`base_url` 是实例地址；Bluesky 的 `remote_id` 是 handle/identifier，`base_url` 是 PDS 地址，`token_env` 指向 app password。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：

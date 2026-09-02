@@ -175,7 +175,7 @@ func (s *Store) ListProfiles(ctx context.Context) ([]Profile, error) {
 		return nil, e
 	}
 	defer rows.Close()
-	var out []Profile
+	out := make([]Profile, 0)
 	for rows.Next() {
 		var p Profile
 		var t string
@@ -229,7 +229,7 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 		return nil, e
 	}
 	defer rows.Close()
-	var out []Account
+	out := make([]Account, 0)
 	for rows.Next() {
 		var a Account
 		var t string
@@ -296,7 +296,7 @@ func (s *Store) ListTopics(ctx context.Context, profileID string) ([]Topic, erro
 		return nil, e
 	}
 	defer rows.Close()
-	var out []Topic
+	out := make([]Topic, 0)
 	for rows.Next() {
 		var t Topic
 		var c, u string
@@ -418,7 +418,7 @@ func (s *Store) ListVariants(ctx context.Context, topicID string) ([]Variant, er
 	if e != nil {
 		return nil, e
 	}
-	var ids []string
+	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if e = rows.Scan(&id); e != nil {
@@ -434,7 +434,7 @@ func (s *Store) ListVariants(ctx context.Context, topicID string) ([]Variant, er
 	if e = rows.Close(); e != nil {
 		return nil, e
 	}
-	var out []Variant
+	out := make([]Variant, 0)
 	for _, variantID := range ids {
 		v, e := s.GetVariant(ctx, variantID)
 		if e != nil {
@@ -598,7 +598,7 @@ func (s *Store) ListMedia(ctx context.Context, topicID string) ([]Media, error) 
 		return nil, e
 	}
 	defer rows.Close()
-	var out []Media
+	out := make([]Media, 0)
 	for rows.Next() {
 		var m Media
 		var t string
@@ -657,7 +657,7 @@ func (s *Store) ListPublications(ctx context.Context) ([]Publication, error) {
 		return nil, e
 	}
 	defer rows.Close()
-	var out []Publication
+	out := make([]Publication, 0)
 	for rows.Next() {
 		var p Publication
 		var pub, c string
@@ -718,7 +718,7 @@ func (s *Store) ListExternalPosts(ctx context.Context, topicID string) ([]Extern
 		return nil, e
 	}
 	defer rows.Close()
-	var out []ExternalPost
+	out := make([]ExternalPost, 0)
 	for rows.Next() {
 		var p ExternalPost
 		var t, mediaJSON string
@@ -769,7 +769,7 @@ func (s *Store) ListTranslationConfigs(ctx context.Context) ([]TranslationConfig
 		return nil, err
 	}
 	defer rows.Close()
-	var out []TranslationConfig
+	out := make([]TranslationConfig, 0)
 	for rows.Next() {
 		var c TranslationConfig
 		var created string
@@ -830,7 +830,7 @@ func (s *Store) ListTranslations(ctx context.Context) ([]Translation, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Translation
+	out := make([]Translation, 0)
 	for rows.Next() {
 		var t Translation
 		var created string

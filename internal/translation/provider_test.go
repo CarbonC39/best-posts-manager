@@ -112,7 +112,8 @@ func TestProviderRejectsPartialResponseWithoutCreatingText(t *testing.T) {
 
 func TestProviderTimeoutIsActionableAndDoesNotLeakResponse(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusGatewayTimeout)
 	}))
 	defer ts.Close()
 	t.Setenv("TRANSLATION_SECRET", "secret-timeout")
@@ -120,9 +121,9 @@ func TestProviderTimeoutIsActionableAndDoesNotLeakResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpProvider := p.(*HTTPProvider)
-	httpProvider.HTTP.Timeout = 10 * time.Millisecond
-	_, err = p.Translate(context.Background(), Request{Text: "hello", TargetLanguage: "zh"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err = p.Translate(ctx, Request{Text: "hello", TargetLanguage: "zh"})
 	if err == nil || !strings.Contains(err.Error(), "translation request failed") || strings.Contains(err.Error(), "secret-timeout") {
 		t.Fatalf("unexpected timeout error: %v", err)
 	}
