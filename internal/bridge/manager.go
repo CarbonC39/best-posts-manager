@@ -20,6 +20,7 @@ const (
 	ProtocolVersion = "v1"
 	PairingTTL      = 10 * time.Minute
 	TokenTTL        = 8 * time.Hour
+	HeartbeatTTL    = 30 * time.Second
 	RequestTTL      = 15 * time.Minute
 	MaxTextBytes    = 32 << 10
 	MaxMedia        = 16
@@ -36,19 +37,23 @@ type Manager struct {
 	requests map[string]*Request
 }
 type pairing struct {
-	ID, Platform, CodeHash, TokenHash string
-	CodeExpiresAt, TokenExpiresAt     time.Time
-	CodeUsed, Revoked                 bool
+	ID, Platform, CodeHash, TokenHash, PageURL string
+	CodeExpiresAt, TokenExpiresAt              time.Time
+	LastSeenAt                                 time.Time
+	CodeUsed, Revoked                          bool
 }
 type Pairing struct {
-	ID        string    `json:"id"`
-	Version   string    `json:"version"`
-	Platform  string    `json:"platform"`
-	Code      string    `json:"code,omitempty"`
-	Token     string    `json:"token,omitempty"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CodeUsed  bool      `json:"code_used"`
-	Revoked   bool      `json:"revoked"`
+	ID         string    `json:"id"`
+	Version    string    `json:"version"`
+	Platform   string    `json:"platform"`
+	Code       string    `json:"code,omitempty"`
+	Token      string    `json:"token,omitempty"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	CodeUsed   bool      `json:"code_used"`
+	Revoked    bool      `json:"revoked"`
+	PageURL    string    `json:"page_url,omitempty"`
+	LastSeenAt time.Time `json:"last_seen_at,omitempty"`
+	Connected  bool      `json:"connected"`
 }
 type Media struct {
 	ID       string `json:"id"`
@@ -78,6 +83,7 @@ type Request struct {
 	RemoteID         string    `json:"remote_id,omitempty"`
 	ExternalPostID   string    `json:"external_post_id,omitempty"`
 	Error            string    `json:"error,omitempty"`
+	Warning          string    `json:"warning,omitempty"`
 	Incomplete       bool      `json:"incomplete,omitempty"`
 	IncompleteReason string    `json:"incomplete_reason,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
@@ -111,16 +117,32 @@ func (m *Manager) CreatePairing(platform string) (Pairing, error) {
 	m.mu.Unlock()
 	return Pairing{ID: p.ID, Version: ProtocolVersion, Platform: platform, Code: code, ExpiresAt: p.CodeExpiresAt}, nil
 }
+func pairingView(p *pairing, now time.Time) Pairing {
+	expires := p.CodeExpiresAt
+	if p.CodeUsed {
+		expires = p.TokenExpiresAt
+	}
+	return Pairing{ID: p.ID, Version: ProtocolVersion, Platform: p.Platform, ExpiresAt: expires,
+		CodeUsed: p.CodeUsed, Revoked: p.Revoked, PageURL: diagnosticPageURL(p.PageURL), LastSeenAt: p.LastSeenAt,
+		Connected: p.CodeUsed && !p.Revoked && now.Before(p.TokenExpiresAt) && !p.LastSeenAt.IsZero() && now.Before(p.LastSeenAt.Add(HeartbeatTTL))}
+}
+
+func diagnosticPageURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
 func (m *Manager) ListPairings() []Pairing {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]Pairing, 0, len(m.pairs))
 	for _, p := range m.pairs {
-		expires := p.CodeExpiresAt
-		if p.CodeUsed {
-			expires = p.TokenExpiresAt
-		}
-		out = append(out, Pairing{ID: p.ID, Version: ProtocolVersion, Platform: p.Platform, ExpiresAt: expires, CodeUsed: p.CodeUsed, Revoked: p.Revoked})
+		out = append(out, pairingView(p, m.Now()))
 	}
 	return out
 }
@@ -178,7 +200,28 @@ func (m *Manager) Hello(code, platform, pageURL, origin string) (Pairing, error)
 	p.CodeHash = ""
 	p.TokenHash = hash(token)
 	p.TokenExpiresAt = m.Now().Add(TokenTTL)
-	return Pairing{ID: p.ID, Version: ProtocolVersion, Platform: p.Platform, Token: token, ExpiresAt: p.TokenExpiresAt, CodeUsed: true}, nil
+	p.PageURL = pageURL
+	p.LastSeenAt = m.Now()
+	view := pairingView(p, m.Now())
+	view.Token = token
+	return view, nil
+}
+
+func (m *Manager) resolvePageURL(pairingID, requested string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.pairs[pairingID]
+	if !ok || p.Revoked || !p.CodeUsed || !m.Now().Before(p.TokenExpiresAt) {
+		return "", errors.New("pairing is not connected, expired, or revoked")
+	}
+	pageURL := strings.TrimSpace(requested)
+	if pageURL == "" {
+		pageURL = p.PageURL
+	}
+	if !AllowedPage(p.Platform, pageURL) {
+		return "", errors.New("a connected platform page URL is required")
+	}
+	return pageURL, nil
 }
 func (m *Manager) authenticate(token, pairingID, platform, pageURL, origin string) error {
 	m.mu.Lock()
@@ -190,6 +233,8 @@ func (m *Manager) authenticate(token, pairingID, platform, pageURL, origin strin
 	if p.ID != pairingID || !p.CodeUsed || p.Platform != platform || !AllowedPage(platform, pageURL) || (origin != "" && !AllowedPage(platform, origin)) {
 		return errors.New("bridge authentication or page origin is invalid")
 	}
+	p.PageURL = pageURL
+	p.LastSeenAt = m.Now()
 	return nil
 }
 func (m *Manager) AuthenticateForHTTP(token string, r Request, pageURL, origin string) error {
@@ -211,7 +256,11 @@ func (m *Manager) CreateFill(ctx context.Context, pairingID, variantID, pageURL 
 	if err != nil {
 		return Request{}, err
 	}
-	if pairPlatform != a.Platform || !supported[a.Platform] || !AllowedPage(a.Platform, pageURL) {
+	if a.Disabled {
+		return Request{}, errors.New("account is deactivated; add an active account before browser fill")
+	}
+	pageURL, err = m.resolvePageURL(pairingID, pageURL)
+	if err != nil || pairPlatform != a.Platform || !supported[a.Platform] || !AllowedPage(a.Platform, pageURL) {
 		return Request{}, errors.New("account platform or page URL is not bridge-supported")
 	}
 	media, err := m.Store.ListMedia(ctx, v.TopicID)
@@ -245,7 +294,11 @@ func (m *Manager) CreateCapture(ctx context.Context, pairingID, topicID, account
 	if err != nil {
 		return Request{}, err
 	}
-	if pairPlatform != platform || a.Platform != platform || !supported[platform] || !AllowedPage(platform, pageURL) {
+	if a.Disabled {
+		return Request{}, errors.New("account is deactivated; add an active account before capture")
+	}
+	pageURL, err = m.resolvePageURL(pairingID, pageURL)
+	if err != nil || pairPlatform != platform || a.Platform != platform || !supported[platform] || !AllowedPage(platform, pageURL) {
 		return Request{}, errors.New("account platform or page URL is not bridge-supported")
 	}
 	topic, err := m.Store.GetTopic(ctx, topicID)
@@ -295,6 +348,9 @@ func (m *Manager) Request(id string) (Request, error) {
 func (m *Manager) Pending(pairingID string) []Request {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if p := m.pairs[pairingID]; p != nil {
+		p.LastSeenAt = m.Now()
+	}
 	out := []Request{}
 	for _, r := range m.requests {
 		if r.PairingID == pairingID && r.Status == "pending" {
@@ -310,6 +366,33 @@ func (m *Manager) Pending(pairingID string) []Request {
 		}
 	}
 	return out
+}
+
+// Filled records that the userscript successfully put content into the visible
+// editor. It does not publish; the publication remains needs_confirmation until
+// the user confirms the post and the script returns a result.
+func (m *Manager) Filled(id, warning string) (Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.requests[id]
+	if !ok {
+		return Request{}, app.ErrNotFound
+	}
+	if r.Kind != "fill" {
+		return Request{}, errors.New("filled is only valid for fill requests")
+	}
+	if r.Status == "filled" {
+		if r.Warning == warning {
+			return *r, nil
+		}
+		return Request{}, errors.New("filled request warning conflicts with existing result")
+	}
+	if r.Status != "pending" {
+		return *r, errors.New("fill request is no longer awaiting the editor")
+	}
+	r.Status = "filled"
+	r.Warning = strings.TrimSpace(warning)
+	return *r, nil
 }
 func (m *Manager) Result(ctx context.Context, id, resultURL, remoteID string) (Request, error) {
 	if strings.TrimSpace(resultURL) == "" && strings.TrimSpace(remoteID) == "" {
@@ -338,7 +421,7 @@ func (m *Manager) Result(ctx context.Context, id, resultURL, remoteID string) (R
 		}
 		return out, nil
 	}
-	if r.Status != "pending" && r.Status != "needs_confirmation" {
+	if r.Status != "pending" && r.Status != "filled" && r.Status != "needs_confirmation" {
 		out := *r
 		m.mu.Unlock()
 		return out, errors.New("request is no longer accepting a result")
@@ -374,7 +457,7 @@ func (m *Manager) Error(ctx context.Context, id, message string) (Request, error
 		m.mu.Unlock()
 		return out, nil
 	}
-	if r.Status != "pending" {
+	if r.Status != "pending" && r.Status != "filled" {
 		out := *r
 		m.mu.Unlock()
 		return out, errors.New("request is no longer accepting an error")

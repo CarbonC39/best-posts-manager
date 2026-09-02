@@ -59,6 +59,8 @@ SQLite 表按上述实体拆分，使用稳定的本地 ID、创建/更新时间
 
 Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能指向一个平台身份，且只能归属一个 Profile；同一 Profile 可有多个平台和多个 Account，同一平台也可有多个 Account。不设计共享 Account。删除或停用 Account 不得删除历史 Publication。
 
+首版的“移除账号”是可逆性较好的停用：账号行保留并标记 disabled，清空本地 credential 引用及凭据文件，活跃选择器隐藏它；已有 Variant、Publication 和 ExternalPost 仍可查看，但不能再次发布或桥接填入。
+
 平台长期凭据通过本地凭据存储或操作系统 keychain 保存，SQLite 只保存引用和非敏感元数据；它们不出现在 API 响应、CLI 普通输出、错误消息或日志中。浏览器桥接的短期 bearer 是例外：只由 `hello` 成功响应签发一次，随后仅以哈希留在 Go 进程内存。用户主动导出数据时默认排除凭据，导入时明确提示可能含敏感内容。
 
 ## 平台能力与 adapter
@@ -87,9 +89,9 @@ X、微博、小红书和 QQ 空间无法依赖稳定的公开发布 API 时，�
 
 ### 协议
 
-节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发八小时 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次，token 只存内存哈希，撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL、日志或 SQLite。
+节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发八小时 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`filled`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次，token 只存内存哈希；用户脚本将 bearer 放在油猴隔离存储以支持页面刷新，不放站点 localStorage，服务端 TTL/撤销仍立即生效。撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL、日志或 SQLite。
 
-本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持以后由脚本管理器检查更新。HTTP 日志只记录 method、path、status 和耗时，不记录 query 或 body；连接日志只记录平台与阶段。
+本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持脚本管理器检查更新。HTTP 日志只记录 method、path、status 和耗时，不记录 query 或 body；连接日志只记录平台与阶段。WebUI 显示配对的当前 page URL、最后心跳、有效/撤销状态和最近请求状态；“已连接”要求最近 30 秒内有心跳，避免把已关闭的平台页显示为在线。已连接配对创建 fill/capture 时可省略 page URL，服务端使用内存中的已校验页面，而脚本每次请求仍提交并校验实际当前页面。
 
 管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication，脚本只填充，用户人工发布后回传 URL/ID；超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本没有发布按钮点击权限，也不调用隐藏 API。
 

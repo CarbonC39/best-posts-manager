@@ -67,6 +67,10 @@ func TestBridgeHTTPPairFillResultAndCapture(t *testing.T) {
 	if res.StatusCode != 200 || len(pending) != 1 {
 		t.Fatalf("pending: %s %#v", res.Status, pending)
 	}
+	res = postBridge(t, ts.URL+"/bridge/v1/requests/"+request.ID+"/filled", hello.Token, request.ID, "x", map[string]string{"warning": "图片需人工检查"}, &request)
+	if res.StatusCode != 200 || request.Status != "filled" || request.Warning != "图片需人工检查" {
+		t.Fatalf("filled: %s %#v", res.Status, request)
+	}
 	var done bridge.Request
 	res = postBridge(t, ts.URL+"/bridge/v1/requests/"+request.ID+"/result", hello.Token, request.ID, "x", map[string]string{"url": "https://x.com/i/1", "remote_id": "1"}, &done)
 	if res.StatusCode != 200 || done.Status != "published" {

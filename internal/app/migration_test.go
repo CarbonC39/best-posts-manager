@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestV1DatabaseMigratesToV6WithoutDataLoss(t *testing.T) {
+func TestV1DatabaseMigratesToV7WithoutDataLoss(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
 	if err != nil {
@@ -32,7 +32,7 @@ func TestV1DatabaseMigratesToV6WithoutDataLoss(t *testing.T) {
 		t.Fatalf("unexpected migrated local_only: %d", local)
 	}
 	var version int
-	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
+	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	var cid string
@@ -118,5 +118,36 @@ func TestV6MigrationFailureRollsBackCredentialColumns(t *testing.T) {
 	var columns int
 	if err = check.QueryRow(`SELECT count(*) FROM pragma_table_info('accounts') WHERE name='credential_ref'`).Scan(&columns); err != nil || columns != 0 {
 		t.Fatalf("partial credential migration: %d %v", columns, err)
+	}
+}
+
+func TestV7MigrationFailureRollsBackDisabledColumn(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(6); CREATE TABLE accounts(id TEXT PRIMARY KEY, profile_id TEXT, platform TEXT, name TEXT, remote_id TEXT, base_url TEXT, token_env TEXT, credential_ref TEXT, created_at TEXT); CREATE TRIGGER block_v7 BEFORE INSERT ON schema_migrations WHEN NEW.version=7 BEGIN SELECT RAISE(ABORT,'block v7'); END;`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(context.Background(), dir); err == nil {
+		t.Fatal("migration should fail")
+	}
+	check, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version, columns int
+	if err = check.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if err = check.QueryRow(`SELECT count(*) FROM pragma_table_info('accounts') WHERE name='disabled'`).Scan(&columns); err != nil || columns != 0 {
+		t.Fatalf("partial account deactivation migration: %d %v", columns, err)
 	}
 }

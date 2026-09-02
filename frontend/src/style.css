@@ -32,7 +32,7 @@ nav button.active span { color: #52745c; }
 .local-status small { margin-top: 2px; font-size: 11px; color: #aaa79f; }
 
 .canvas { width: 100%; min-width: 0; padding: 70px 42px 100px; }
-.page-section { width: min(100%, 920px); margin: 0 auto; }
+.page-section { width: min(100%, 1080px); margin: 0 auto; }
 .eyebrow { margin-bottom: 10px; color: #aaa79f; font-size: 11px; font-weight: 650; letter-spacing: .11em; }
 h1 { margin: 0; color: #2f2e2b; font-size: 34px; font-weight: 650; letter-spacing: -.035em; }
 h3 { margin: 34px 0 10px; color: #4c4943; font-size: 16px; font-weight: 650; }
@@ -70,7 +70,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .topic-list .link { font-weight: 550; }
 
 .editor-page .back { margin-bottom: 35px; color: #aaa79f !important; font-size: 13px; }
-.draft-editor { min-height: 245px; margin-top: 24px; padding: 0; border: 0; border-bottom: 1px solid #e9e7e1; border-radius: 0; resize: vertical; color: #37352f; font-family: inherit; font-size: 20px; line-height: 1.7; }
+.editor-page { width: min(100%, 1080px); }
+.draft-editor { display: block; width: 100%; min-height: 60vh; margin-top: 24px; padding: 0 0 18px; border: 0; border-bottom: 1px solid #e9e7e1; border-radius: 0; resize: vertical; color: #37352f; background: transparent; font-family: inherit; font-size: clamp(20px, 2.1vw, 25px); line-height: 1.75; }
 .draft-editor:focus { outline: 0; border-bottom-color: #9ab7a0; }
 .draft-editor:focus-visible { outline: 2px solid #d5e4d8; outline-offset: 5px; }
 .editor-toolbar { margin: 15px 0 45px; }
@@ -96,6 +97,15 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .variants small { display: block; margin-top: 7px; color: #aaa79f; font-size: 11px; }
 .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 145px; }
 .preview { margin: 14px 0 0; padding: 12px 14px; border-left: 2px solid #dbe7dd; color: #77736d; background: #fafaf8; font: inherit; font-size: 13px; white-space: pre-wrap; }
+.bridge-status-panel { margin: 34px 0 4px; padding: 17px 0 4px; border-top: 1px solid #ecebe6; }
+.bridge-status-panel .section-label { margin-top: 0; }
+.bridge-steps, .bridge-state, .bridge-request-status { margin: 8px 0; color: #77736d; font-size: 13px; line-height: 1.7; }
+.bridge-pairings li { padding: 10px 0; }
+.bridge-pairings strong, .bridge-pairings small { display: block; }
+.bridge-pairings strong { color: #66635d; font-size: 13px; font-weight: 600; }
+.bridge-pairings code { display: inline-block; margin-top: 4px; color: #557a60; letter-spacing: .08em; }
+.bridge-pairings small { margin-top: 3px; color: #aaa79f; font-size: 11px; }
+.disabled-account { color: #a2773f !important; }
 
 .tool-section { margin-top: 34px; border-top: 1px solid #ecebe6; }
 .tool-section summary { padding: 17px 0; color: #66635d; cursor: pointer; font-size: 14px; font-weight: 600; list-style-position: inside; }

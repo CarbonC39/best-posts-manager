@@ -156,6 +156,28 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 		}
 		rollback = false
 	}
+	if version < 7 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, txErr = tx.ExecContext(ctx, `ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0`); txErr != nil && !strings.Contains(txErr.Error(), "duplicate column") {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(7)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
 	return nil
 }
 
@@ -232,7 +254,7 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()
 	}
-	_, e := s.DB.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CredentialRef, a.CreatedAt.Format(time.RFC3339Nano))
+	_, e := s.DB.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CredentialRef, boolInt(a.Disabled), a.CreatedAt.Format(time.RFC3339Nano))
 	return a, e
 }
 func supportedPlatform(name string) bool {
@@ -244,7 +266,7 @@ func supportedPlatform(name string) bool {
 	}
 }
 func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, error) {
-	q := `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,created_at FROM accounts`
+	q := `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at FROM accounts`
 	var args []any
 	if profileID != "" {
 		q += ` WHERE profile_id=?`
@@ -260,10 +282,12 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 	for rows.Next() {
 		var a Account
 		var t string
-		if e = rows.Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &t); e != nil {
+		var disabled int
+		if e = rows.Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &disabled, &t); e != nil {
 			return nil, e
 		}
 		a.CreatedAt = parseTime(t)
+		a.Disabled = disabled != 0
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -271,12 +295,25 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 func (s *Store) GetAccount(ctx context.Context, aid string) (Account, error) {
 	var a Account
 	var t string
-	e := s.DB.QueryRowContext(ctx, `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,created_at FROM accounts WHERE id=?`, aid).Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &t)
+	var disabled int
+	e := s.DB.QueryRowContext(ctx, `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at FROM accounts WHERE id=?`, aid).Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &disabled, &t)
 	if e == sql.ErrNoRows {
 		e = ErrNotFound
 	}
 	a.CreatedAt = parseTime(t)
+	a.Disabled = disabled != 0
 	return a, e
+}
+
+// DeactivateAccount preserves all foreign-key history while preventing future use.
+func (s *Store) DeactivateAccount(ctx context.Context, aid string) (Account, error) {
+	if _, err := s.GetAccount(ctx, aid); err != nil {
+		return Account{}, err
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE accounts SET disabled=1, credential_ref='' WHERE id=?`, aid); err != nil {
+		return Account{}, err
+	}
+	return s.GetAccount(ctx, aid)
 }
 func (s *Store) CreateTopic(ctx context.Context, t Topic) (Topic, error) {
 	if !s.profileExists(ctx, t.ProfileID) {

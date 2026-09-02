@@ -52,6 +52,9 @@ func (s *Service) Translate(ctx context.Context, req TranslationRequest) (app.Va
 	if err != nil {
 		return app.Variant{}, app.Translation{}, err
 	}
+	if target.Disabled {
+		return app.Variant{}, app.Translation{}, errors.New("translation target account is deactivated")
+	}
 	sourceAccount, err := s.Store.GetAccount(ctx, source.AccountID)
 	if err != nil {
 		return app.Variant{}, app.Translation{}, err
@@ -91,6 +94,9 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 	account, e := s.Store.GetAccount(ctx, v.AccountID)
 	if e != nil {
 		return app.Publication{}, e
+	}
+	if account.Disabled {
+		return app.Publication{}, errors.New("account is deactivated; restore or add an active account before publishing")
 	}
 	p, e := s.Store.CreatePublication(ctx, app.Publication{VariantID: v.ID, AccountID: account.ID, Status: "publishing", Source: "internal"})
 	if e != nil {
@@ -154,10 +160,27 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 	return p, nil
 }
 
+// DeactivateAccount removes its local secret and keeps the account row for history.
+func (s *Service) DeactivateAccount(ctx context.Context, accountID string) (app.Account, error) {
+	a, err := s.Store.GetAccount(ctx, accountID)
+	if err != nil {
+		return app.Account{}, err
+	}
+	if a.CredentialRef != "" && s.Credentials != nil {
+		if err = s.Credentials.Delete(a.CredentialRef); err != nil {
+			return app.Account{}, errors.New("could not remove local credential; account remains active")
+		}
+	}
+	return s.Store.DeactivateAccount(ctx, accountID)
+}
+
 func (s *Service) ImportExternal(ctx context.Context, topicID, accountID, reference string) (app.ExternalPost, error) {
 	a, err := s.Store.GetAccount(ctx, accountID)
 	if err != nil {
 		return app.ExternalPost{}, err
+	}
+	if a.Disabled {
+		return app.ExternalPost{}, errors.New("account is deactivated; add an active account before importing")
 	}
 	topic, err := s.Store.GetTopic(ctx, topicID)
 	if err != nil {
@@ -199,6 +222,9 @@ func (s *Service) Retry(ctx context.Context, publicationID string) (app.Publicat
 	account, err := s.Store.GetAccount(ctx, p.AccountID)
 	if err != nil {
 		return p, err
+	}
+	if account.Disabled {
+		return p, errors.New("account is deactivated; add an active account before retrying")
 	}
 	p.Status = "publishing"
 	p.ErrorCategory = ""

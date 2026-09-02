@@ -244,6 +244,21 @@ func (s *Server) bridgeScript(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if len(parts) == 3 && parts[2] == "filled" && r.Method == http.MethodPost {
+		var req struct {
+			Warning string `json:"warning"`
+		}
+		if !decodeBridge(w, r, &req) {
+			return
+		}
+		v, e := b.Filled(id, req.Warning)
+		if e != nil {
+			fail(w, 409, e)
+		} else {
+			writeJSON(w, 200, v)
+		}
+		return
+	}
 	if len(parts) == 3 && parts[2] == "error" && r.Method == http.MethodPost {
 		var req struct {
 			Error string `json:"error"`

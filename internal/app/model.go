@@ -18,6 +18,7 @@ type Account struct {
 	BaseURL       string    `json:"base_url"`
 	TokenEnv      string    `json:"token_env"`
 	CredentialRef string    `json:"credential_ref"`
+	Disabled      bool      `json:"disabled"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 type Topic struct {

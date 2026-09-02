@@ -4,15 +4,15 @@ import { api } from './api'
 import PublicationList from './PublicationList.vue'
 
 type Profile = { id: string; name: string }
-type Account = { id: string; profile_id: string; platform: string; name: string; remote_id: string; credential_ref?: string }
+type Account = { id: string; profile_id: string; platform: string; name: string; remote_id: string; credential_ref?: string; disabled?: boolean }
 type Topic = { id: string; profile_id: string; title: string; status: string }
 type Draft = { topic_id: string; text: string; format: string; revision: number }
 type Variant = { id: string; topic_id: string; account_id: string; text: string; format: string; status: string; relation: string; visibility: string; spoiler_text: string; local_only: boolean; outdated: boolean }
 type Media = { id: string; variant_id: string; filename: string; alt_text: string }
 type ExternalPost = { id: string; platform: string; url: string; text_snapshot: string; incomplete: boolean; incomplete_reason: string }
 type Emoji = { shortcode: string; url: string; static_url: string }
-type BridgePairing = { id: string; platform: string; code?: string; expires_at: string; code_used: boolean; revoked: boolean }
-type BridgeRequest = { id: string; kind: string; status: string; error?: string; external_post_id?: string }
+type BridgePairing = { id: string; platform: string; code?: string; expires_at: string; code_used: boolean; revoked: boolean; connected?: boolean; page_url?: string; last_seen_at?: string }
+type BridgeRequest = { id: string; kind: string; status: string; warning?: string; error?: string; external_post_id?: string }
 type Capability = { platform: string; format: string; text_max_bytes: number; max_media: number; max_media_bytes: number; visibilities: string[]; supports_cw: boolean; supports_local_only: boolean; custom_emoji: boolean; visibility_note?: string }
 type TranslationConfig = { id: string; provider: string; base_url: string; project_id: string; location: string; token_env: string; key_env: string; model: string }
 
@@ -48,7 +48,6 @@ const externalAccountID = ref('')
 const accountPlatform = ref('mastodon')
 const bridgePairings = ref<BridgePairing[]>([])
 const bridgePlatform = ref('x')
-const bridgePageURL = ref('')
 const bridgeMessage = ref('')
 const bridgeRequest = ref<BridgeRequest | null>(null)
 const translationConfigs = ref<TranslationConfig[]>([])
@@ -81,11 +80,35 @@ const translationProviderDescription = computed(() => ({
   'google-gtx': '非官方 Google translate_a/single：最多 5000 Unicode 字符，可能失效且无需凭据。',
 } as Record<string, string>)[translationProvider.value] || '')
 
-const profileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value))
+const profileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value && !account.disabled))
 const profileTopics = computed(() => topics.value.filter((topic) => topic.profile_id === selectedProfileID.value && topic.status === 'active'))
 const selectedCapability = computed(() => capabilities.value[selectedAccountID.value])
 const selectedAccount = computed(() => accounts.value.find((account) => account.id === selectedAccountID.value))
 const canImportOfficially = computed(() => selectedAccount.value?.platform === 'misskey' || selectedAccount.value?.platform === 'bluesky')
+function pairingState(pairing: BridgePairing) {
+  if (pairing.revoked) return '已撤销'
+  if (pairing.connected) return '已连接，心跳正常'
+  if (pairing.code_used && pairing.expires_at && new Date(pairing.expires_at).getTime() <= Date.now()) return '连接过期'
+  if (pairing.code_used) return '未检测到近期心跳（授权仍有效）'
+  return pairing.code ? '待输入 code' : '未配对'
+}
+
+function bridgeRequestState(request: BridgeRequest) {
+  return ({
+    pending: '等待平台脚本领取',
+    filled: '已填入，等待你在平台页确认发布',
+    published: '已确认发布并回传结果',
+    needs_confirmation: '未收到确定结果，请到平台页人工核对',
+    expired: '请求已过期',
+    failed: '请求失败',
+  } as Record<string, string>)[request.status] || request.status
+}
+
+function connectedPairing(platform?: string) {
+  return bridgePairings.value
+    .filter((pairing) => pairing.connected && !pairing.revoked && pairing.platform === platform)
+    .sort((a, b) => new Date(b.last_seen_at || 0).getTime() - new Date(a.last_seen_at || 0).getTime())[0]
+}
 
 function isBridgePlatform(platform: string) {
   return ['x', 'weibo', 'xiaohongshu', 'qzone'].includes(platform)
@@ -144,6 +167,14 @@ async function addAccount() {
     await load()
     if (!accounts.value.some((account) => account.id === created.id)) accounts.value.push(created)
     message.value = '账号已添加'
+  } catch (error) { showError(error) }
+}
+async function removeAccount(account: Account) {
+  if (!window.confirm(`停用账号“${account.name}”？历史版本和发布记录会保留。`)) return
+  try {
+    await api(`accounts/${account.id}/deactivate`, { method: 'DELETE' })
+    await load()
+    message.value = '账号已停用，本地凭据已移除；历史记录仍保留'
   } catch (error) { showError(error) }
 }
 
@@ -248,23 +279,62 @@ async function loadEmoji() {
   } catch (error) { message.value = `emoji 加载失败：${error instanceof Error ? error.message : String(error)}` }
 }
 async function createBridgePairing() {
-  try { const pairing = await api<BridgePairing>('bridge/pairings', { method: 'POST', body: JSON.stringify({ platform: bridgePlatform.value }) }); bridgePairings.value.unshift(pairing); bridgeMessage.value = `请在 10 分钟内把一次性 code ${pairing.code} 输入用户脚本；bearer 将由配对交换并只保存在页面内存中` } catch (error) { showError(error) }
+  try {
+    const pairing = await api<BridgePairing>('bridge/pairings', { method: 'POST', body: JSON.stringify({ platform: bridgePlatform.value }) })
+    bridgePairings.value.unshift(pairing)
+    bridgeMessage.value = `配对码已生成：${pairing.code}。请复制到平台页脚本；10 分钟内有效。`
+    if (pairing.code) {
+      try {
+        await copyText(pairing.code)
+        bridgeMessage.value += ' 已自动复制。'
+      } catch {
+        bridgeMessage.value += ' 自动复制失败，请使用旁边的“复制 code”按钮。'
+      }
+    }
+  } catch (error) { showError(error) }
+}
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+  const input = document.createElement('textarea')
+  input.value = value
+  input.style.position = 'fixed'
+  input.style.opacity = '0'
+  document.body.appendChild(input)
+  input.select()
+  const copied = typeof document.execCommand === 'function' && document.execCommand('copy')
+  input.remove()
+  if (!copied) throw new Error('clipboard unavailable')
+}
+async function copyPairingCode(pairing: BridgePairing) {
+  if (!pairing.code) return
+  try { await copyText(pairing.code); bridgeMessage.value = '配对 code 已复制' }
+  catch { bridgeMessage.value = '无法自动复制，请选中 code 后手动复制' }
 }
 async function revokeBridgePairing(pairing: BridgePairing) {
   try { await api(`bridge/pairings/${pairing.id}/revoke`, { method: 'POST' }); pairing.revoked = true; bridgeMessage.value = '配对已撤销' } catch (error) { showError(error) }
 }
 async function fillBrowser(variant: Variant) {
   const account = accounts.value.find((item) => item.id === variant.account_id)
-  const pairing = bridgePairings.value.find((item) => item.code_used && !item.revoked && item.platform === account?.platform)
-  if (!pairing || !bridgePageURL.value.trim()) { bridgeMessage.value = '请先完成匹配平台的配对、刷新状态，并填写平台页面 URL'; return }
-  try { bridgeRequest.value = await api<BridgeRequest>('bridge/requests/fill', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, variant_id: variant.id, page_url: bridgePageURL.value }) }); bridgeMessage.value = '已发送填充请求：请在平台页检查后人工发布' } catch (error) { showError(error) }
+  const pairing = connectedPairing(account?.platform)
+  if (!pairing) {
+    const authorized = bridgePairings.value.some((item) => item.code_used && !item.revoked && item.platform === account?.platform)
+    bridgeMessage.value = authorized ? '已有授权，但没有检测到平台脚本近期心跳；请打开平台页并检查右下角 bridge 状态' : '请先完成匹配平台的配对；脚本会把当前页面安全回传给本地服务'
+    return
+  }
+  try {
+    bridgeRequest.value = await api<BridgeRequest>('bridge/requests/fill', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, variant_id: variant.id, page_url: pairing.page_url || '' }) })
+    bridgeMessage.value = '已发送，等待脚本领取；填入后请人工检查并点击平台发布'
+  } catch (error) { showError(error) }
 }
 async function requestCapture() {
-  if (!selected.value || !selectedAccountID.value || !bridgePageURL.value.trim()) { bridgeMessage.value = '请选择账号并填写当前平台页面 URL'; return }
+  if (!selected.value || !selectedAccountID.value) { bridgeMessage.value = '请选择话题和账号'; return }
   const account = accounts.value.find((item) => item.id === selectedAccountID.value)
-  const pairing = bridgePairings.value.find((item) => item.code_used && !item.revoked && item.platform === account?.platform)
+  const pairing = connectedPairing(account?.platform)
   if (!pairing || !['x', 'weibo', 'xiaohongshu', 'qzone'].includes(account?.platform || '')) { bridgeMessage.value = '请先创建匹配平台的配对'; return }
-  try { bridgeRequest.value = await api<BridgeRequest>('bridge/requests/capture', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, topic_id: selected.value.id, account_id: selectedAccountID.value, platform: account?.platform, page_url: bridgePageURL.value }) }); bridgeMessage.value = '已创建捕获请求：用户脚本只读取当前可见页面' } catch (error) { showError(error) }
+  try { bridgeRequest.value = await api<BridgeRequest>('bridge/requests/capture', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, topic_id: selected.value.id, account_id: selectedAccountID.value, platform: account?.platform, page_url: pairing.page_url || '' }) }); bridgeMessage.value = '已创建捕获请求：用户脚本只读取当前可见页面' } catch (error) { showError(error) }
 }
 async function addTranslationConfig() {
   if (translationProvider.value !== 'google-gtx' && !translationCredentialEnv.value.trim()) { translationMessage.value = '请填写凭据环境变量名'; return }
@@ -339,8 +409,9 @@ onMounted(async () => {
         <div class="actions editor-toolbar"><button class="primary-action" @click="saveDraft">保存基础稿</button><select v-model="selectedAccountID" aria-label="目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} ({{account.platform}})</option></select><button @click="newVariant">从基础稿生成 Variant</button></div>
         <div class="media-tools"><div class="section-label"><span>媒体</span><small>图片只存储在本机</small></div><div class="actions"><select v-model="mediaVariantID"><option value="">通用媒体</option><option v-for="variant in variants" :key="variant.id" :value="variant.id">{{variant.account_id}}</option></select><input v-model="altText" placeholder="图片替代文本"><label class="upload">添加图片<input type="file" accept="image/*" @change="uploadMedia"></label></div><ul v-if="media.length" class="media-list"><li v-for="item in media" :key="item.id"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span>{{item.filename}}</span></li></ul></div>
         <div class="platform-heading"><div><div class="section-label"><span>平台版本</span><small>{{variants.length}} 个版本</small></div><small>编辑控件由账号能力决定；Misskey 保留 MFM，Bluesky 使用纯文本与 facets。</small><small v-if="selectedCapability?.visibility_note">{{selectedCapability.visibility_note}}</small></div><button v-if="selectedCapability?.custom_emoji" class="text-button" @click="loadEmoji">加载实例 emoji</button></div><div class="emoji-list"><span v-for="emoji in emojis" :key="emoji.shortcode" class="emoji"><img :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div>
-        <p v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</p><ul v-else class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span class="variant-meta">{{variant.account_id}} · {{variant.format}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><select v-model="variant.visibility"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="CW（可选）"><label v-if="variantCapability(variant)?.supports_local_only"><input type="checkbox" v-model="variant.local_only">仅本地</label><small v-if="variantCapability(variant)?.format==='mfm'">原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button class="primary-action" @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button v-if="!isBridgePlatform(accounts.find(a=>a.id===variant.account_id)?.platform||'')" @click="publish(variant.id)">发布</button><button v-else @click="fillBrowser(variant)">填入浏览器（不发布）</button></div></li></ul>
-        <details class="tool-section"><summary>发布与导入工具</summary><div class="tool-content"><h3>浏览器桥接 v1</h3><small>用户脚本只读取当前可见 DOM；填入后必须在平台页人工检查并发布，程序不会点击最终发布按钮。</small><div class="actions"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button @click="createBridgePairing">生成配对</button><input v-model="bridgePageURL" placeholder="当前平台页面 URL"><button @click="requestCapture">请求捕获当前可见帖子</button><button @click="refreshBridgeState">刷新状态/快照</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><p v-if="bridgeRequest">最近请求：{{bridgeRequest.kind}} · {{bridgeRequest.status}}<span v-if="bridgeRequest.error"> · {{bridgeRequest.error}}</span></p><ul class="rows"><li v-for="pairing in bridgePairings" :key="pairing.id"><span>{{pairing.platform}} · {{pairing.revoked?'已撤销':pairing.code_used?'已连接':'待连接'}}<code v-if="pairing.code">code={{pairing.code}}</code></span><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></li></ul>
+        <p v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</p><ul v-else class="rows variants"><li v-for="variant in variants" :key="variant.id"><div><span class="variant-meta">{{variant.account_id}} · {{variant.format}} · {{variant.relation}} · {{variant.status}}<em v-if="variant.outdated">有基础稿更新</em></span><textarea v-model="variant.text" rows="3"></textarea><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><select v-model="variant.visibility"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="CW（可选）"><label v-if="variantCapability(variant)?.supports_local_only"><input type="checkbox" v-model="variant.local_only">仅本地</label><small v-if="variantCapability(variant)?.format==='mfm'">原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><div class="row-actions"><button class="primary-action" @click="saveVariant(variant)">保存</button><button v-if="variant.outdated" @click="applyVariant(variant)">应用更新</button><button v-if="!accounts.find(a=>a.id===variant.account_id)?.disabled && !isBridgePlatform(accounts.find(a=>a.id===variant.account_id)?.platform||'')" @click="publish(variant.id)">直接发布</button><button v-else-if="!accounts.find(a=>a.id===variant.account_id)?.disabled" @click="fillBrowser(variant)">自动填入平台页面（不发布）</button><small v-else class="disabled-account">账号已停用，历史版本仅供查看</small></div></li></ul>
+        <div class="bridge-status-panel" aria-label="浏览器桥接状态"><div class="section-label"><span>浏览器填入</span><small>发布入口保持可见</small></div><p class="bridge-steps">1 安装脚本 → 2 生成 code → 3 复制 code → 4 平台脚本连接 → 5 从 Variant 发送并自动填入；最终发布始终由你在平台页点击。</p><p class="settings-note">先<a href="/userscript/bpm-bridge.user.js">安装或更新本地用户脚本</a>，它只读取当前可见 DOM，不点击发布。</p><div class="actions bridge-controls"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button class="primary-action" @click="createBridgePairing">生成配对 code</button><button @click="refreshBridgeState">刷新连接状态</button><button @click="requestCapture">捕获当前可见帖子</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><div v-if="bridgePairings.length===0" class="bridge-state">未安装/未配对：安装脚本后生成配对。</div><ul v-else class="rows bridge-pairings"><li v-for="pairing in bridgePairings" :key="pairing.id"><div><strong>{{pairing.platform}}：{{pairingState(pairing)}}</strong><code v-if="pairing.code">{{pairing.code}}</code><small v-if="pairing.page_url">当前页：{{pairing.page_url}}</small><small v-if="pairing.last_seen_at">最后心跳：{{new Date(pairing.last_seen_at).toLocaleString()}}</small><small v-if="pairing.expires_at">有效期至：{{new Date(pairing.expires_at).toLocaleString()}}</small></div><div class="row-actions"><button v-if="pairing.code" @click="copyPairingCode(pairing)">复制 code</button><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></div></li></ul><p v-if="bridgeRequest" class="bridge-request-status">最近请求：{{bridgeRequest.kind}} · {{bridgeRequestState(bridgeRequest)}}<span v-if="bridgeRequest.warning"> · 提示：{{bridgeRequest.warning}}</span><span v-if="bridgeRequest.error"> · 错误：{{bridgeRequest.error}}</span></p></div>
+        <details class="tool-section"><summary>发布与导入工具</summary><div class="tool-content"><h3>浏览器桥接 v1</h3><small>用户脚本只读取当前可见 DOM；填入后必须在平台页人工检查并发布，程序不会点击最终发布按钮。已连接配对会短期记住经过校验的当前页面，页面导航后脚本仍会用实际页面 URL 做安全校验。</small>
           <h3>站外关联</h3><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前本地脚本</a>（同源地址，不会触发 file:///）。安装到油猴后，在已登录的平台页面使用配对功能。</p><form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">无账号</option><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form><form @submit.prevent="importExternal"><input v-model="externalReference" placeholder="Misskey note ID/URL 或 Bluesky URL/at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button><small v-if="!canImportOfficially">请选择 Misskey 或 Bluesky 账号</small></form><ul class="rows"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small></li></ul></div></details>
         <details class="tool-section"><summary>翻译工具</summary><div class="tool-content"><small>翻译只生成新的 detached Variant，不覆盖源版本；官方 provider 凭据从本地凭据或环境变量读取。</small><div class="actions"><select v-model="translationSourceID"><option v-for="variant in variants" :key="variant.id" :value="variant.id">源：{{variant.id}}</option></select><select v-model="translationTargetAccountID"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button @click="translateVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="notice">{{translationMessage}}</p></div></details>
       </section>
@@ -350,7 +421,7 @@ onMounted(async () => {
       <section v-else-if="section==='settings'" class="page-section settings-page">
         <div class="eyebrow">偏好与连接</div><h1>设置</h1><p class="lede">Profile、账号和本地工具配置。</p>
         <div class="section-label"><span>Profile</span><small>内容分组</small></div><form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button class="primary-action">添加 Profile</button></form>
-        <div class="section-label"><span>平台账号</span><small>自动连接存本地凭据；手动模式引用环境变量</small></div><form @submit.prevent="addAccount"><select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"><select v-model="accountPlatform" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select><p class="settings-note platform-description">{{platformDescription}}</p><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"><input v-if="!isBridgePlatform(accountPlatform)" v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"><div v-if="accountPlatform==='mastodon' || accountPlatform==='misskey'" class="connection-inline"><button type="button" @click="startConnection(accountPlatform)" :disabled="!selectedProfileID || !baseURL.trim()">{{accountPlatform==='mastodon'?'OAuth 自动连接':'MiAuth 自动连接'}}</button><small>授权将在当前回环服务完成，成功后自动刷新本地账号列表。</small></div><p v-if="connectionMessage" class="notice">{{connectionMessage}}</p><input v-if="!isBridgePlatform(accountPlatform)" v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"><button :disabled="!selectedProfileID">手动添加账号</button></form><ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><span>{{account.name}} · {{account.platform}}</span><small>{{account.credential_ref ? '已连接（本地凭据）' : '手动配置'}}</small></li></ul>
+        <div class="section-label"><span>平台账号</span><small>自动连接存本地凭据；手动模式引用环境变量</small></div><form @submit.prevent="addAccount"><select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"><select v-model="accountPlatform" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select><p class="settings-note platform-description">{{platformDescription}}</p><input v-if="accountPlatform==='bluesky'" v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"><input v-if="!isBridgePlatform(accountPlatform)" v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"><div v-if="accountPlatform==='mastodon' || accountPlatform==='misskey'" class="connection-inline"><button type="button" @click="startConnection(accountPlatform)" :disabled="!selectedProfileID || !baseURL.trim()">{{accountPlatform==='mastodon'?'OAuth 自动连接':'MiAuth 自动连接'}}</button><small>授权将在当前回环服务完成，成功后自动刷新本地账号列表。</small></div><p v-if="connectionMessage" class="notice">{{connectionMessage}}</p><input v-if="!isBridgePlatform(accountPlatform)" v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"><button :disabled="!selectedProfileID">手动添加账号</button></form><ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><span>{{account.name}} · {{account.platform}}</span><button type="button" @click="removeAccount(account)">停用并移除凭据</button></li></ul>
         <div class="section-label"><span>翻译 provider</span><small>配置不包含 key/token</small></div><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option><option value="google-gtx">Google translate_a（非官方）</option></select><p class="settings-note platform-description">{{translationProviderDescription}}</p><input v-if="translationProvider!=='google-gtx'" v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="可选 fake/provider URL"><input v-if="translationProvider!=='google-gtx'" v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form><p v-if="translationMessage" class="notice">{{translationMessage}}</p>
         <div class="section-label"><span>备份与凭据</span><small>离线可恢复</small></div><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前同源脚本</a>，在油猴中确认安装并按页面提示完成配对；脚本只读可见 DOM，绝不自动点击发布。使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值或本地凭据文件；恢复拒绝覆盖非空目录。自动连接使用本地权限受限凭据文件，手动账号仍可引用环境变量，请不要把 token 粘贴到普通字段或日志中。</p>
       </section>

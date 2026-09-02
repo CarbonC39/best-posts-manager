@@ -40,6 +40,9 @@ func TestPairingFillResultIsOneTimeAndIdempotent(t *testing.T) {
 	if err != nil || hello.Token == "" || pair.Token != "" {
 		t.Fatal(err)
 	}
+	if hello.PageURL != "https://x.com/compose" || !hello.Connected || hello.LastSeenAt.IsZero() {
+		t.Fatalf("pairing diagnostics: %+v", hello)
+	}
 	if _, err = m.Hello(pair.Code, "x", "https://x.com/compose", ""); err == nil {
 		t.Fatal("pairing code must be one-time")
 	}
@@ -78,6 +81,46 @@ func TestPairingFillResultIsOneTimeAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestFillCanUseLastConnectedPageAndFilledIsIdempotent(t *testing.T) {
+	m, _, _, v := bridgeFixture(t)
+	pair, _ := m.CreatePairing("x")
+	if _, err := m.Hello(pair.Code, "x", "https://x.com/compose", ""); err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.CreateFill(context.Background(), pair.ID, v.ID, "")
+	if err != nil || r.PageURL != "https://x.com/compose" {
+		t.Fatalf("implicit page URL: %+v %v", r, err)
+	}
+	filled, err := m.Filled(r.ID, "图片未找到")
+	if err != nil || filled.Status != "filled" || filled.Warning != "图片未找到" {
+		t.Fatalf("filled: %+v %v", filled, err)
+	}
+	if _, err = m.Filled(r.ID, "图片未找到"); err != nil {
+		t.Fatalf("filled retry: %v", err)
+	}
+	done, err := m.Result(context.Background(), r.ID, "https://x.com/i/filled", "")
+	if err != nil || done.Status != "published" {
+		t.Fatalf("result after filled: %+v %v", done, err)
+	}
+}
+
+func TestFillRejectsDeactivatedAccount(t *testing.T) {
+	m, _, account, variant := bridgeFixture(t)
+	pair, _ := m.CreatePairing("x")
+	if _, err := m.Hello(pair.Code, "x", "https://x.com/compose?draft=secret#editor", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.ListPairings()[0].PageURL; got != "https://x.com/compose" {
+		t.Fatalf("diagnostic URL leaked query or fragment: %q", got)
+	}
+	if _, err := m.Store.DeactivateAccount(context.Background(), account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateFill(context.Background(), pair.ID, variant.ID, ""); err == nil {
+		t.Fatal("deactivated account must not create a browser fill")
+	}
+}
+
 func TestPairingOriginHostExpiryAndRevoke(t *testing.T) {
 	m, _, _, _ := bridgeFixture(t)
 	now := time.Now()
@@ -111,6 +154,27 @@ func TestPairingOriginHostExpiryAndRevoke(t *testing.T) {
 	now = now.Add(PairingTTL + time.Second)
 	if _, err = m.Hello(expired.Code, "x", "https://x.com/compose", ""); err == nil {
 		t.Fatal("expired pairing must be rejected")
+	}
+}
+
+func TestPairingConnectedRequiresRecentHeartbeat(t *testing.T) {
+	m, _, _, _ := bridgeFixture(t)
+	now := time.Now()
+	m.Now = func() time.Time { return now }
+	pair, _ := m.CreatePairing("x")
+	hello, err := m.Hello(pair.Code, "x", "https://x.com/compose", "")
+	if err != nil || !hello.Connected {
+		t.Fatalf("new pairing should be connected: %+v %v", hello, err)
+	}
+	now = now.Add(HeartbeatTTL + time.Second)
+	if view := m.ListPairings()[0]; view.Connected || !view.CodeUsed {
+		t.Fatalf("stale heartbeat should be visible without revoking authorization: %+v", view)
+	}
+	if err = m.AuthenticatePairing(hello.Token, pair.ID, "x", "https://x.com/compose", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !m.ListPairings()[0].Connected {
+		t.Fatal("authenticated poll should restore connected status")
 	}
 }
 

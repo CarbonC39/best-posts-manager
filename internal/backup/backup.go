@@ -20,7 +20,7 @@ import (
 )
 
 const formatVersion = 1
-const currentSchemaVersion = 6
+const currentSchemaVersion = 7
 
 type manifest struct {
 	FormatVersion int            `json:"format_version"`

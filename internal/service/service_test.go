@@ -13,6 +13,17 @@ import (
 	"best-post-manager/internal/app"
 )
 
+type recordingCredentials struct {
+	deleted string
+}
+
+func (r *recordingCredentials) Get(string) (string, error) { return "", errors.New("not used") }
+func (r *recordingCredentials) Set(string, string) error   { return nil }
+func (r *recordingCredentials) Delete(ref string) error {
+	r.deleted = ref
+	return nil
+}
+
 func TestPublishApplicationFlow(t *testing.T) {
 	t.Setenv("BPM_TEST_TOKEN", "secret")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +81,51 @@ func TestImportRejectsCrossProfileBeforeRemoteRequest(t *testing.T) {
 	}
 	if called {
 		t.Fatal("cross-profile import must not call a remote API")
+	}
+}
+
+func TestDeactivatedAccountCannotPublishOrImport(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	profile, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	account, _ := st.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "misskey", Name: "old"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: profile.ID, Title: "t"})
+	_, _ = st.UpdateBaseDraft(ctx, app.BaseDraft{TopicID: topic.ID, Text: "hello", Format: "plain"})
+	variant, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	if _, err = st.DeactivateAccount(ctx, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(st)
+	if _, err = svc.Publish(ctx, variant.ID); err == nil {
+		t.Fatal("deactivated account must not publish")
+	}
+	if _, err = svc.ImportExternal(ctx, topic.ID, account.ID, "note"); err == nil {
+		t.Fatal("deactivated account must not import")
+	}
+}
+
+func TestDeactivateAccountDeletesCredentialAndClearsReference(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	profile, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	account, _ := st.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "mastodon", Name: "old", CredentialRef: "cred-test"})
+	credentials := &recordingCredentials{}
+	svc := New(st)
+	svc.Credentials = credentials
+	got, err := svc.DeactivateAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.deleted != "cred-test" || !got.Disabled || got.CredentialRef != "" {
+		t.Fatalf("credential cleanup incomplete: deleted=%q account=%+v", credentials.deleted, got)
 	}
 }
 

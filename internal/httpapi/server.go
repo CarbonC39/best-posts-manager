@@ -418,6 +418,19 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "media" && r.Method == http.MethodPost:
 		s.upload(w, r)
 		return
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/deactivate"):
+		if r.Method != http.MethodDelete {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		aid := strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/deactivate")
+		account, err := s.Svc.DeactivateAccount(ctx, aid)
+		if err != nil {
+			fail(w, 400, err)
+		} else {
+			writeJSON(w, http.StatusOK, account)
+		}
+		return
 	}
 	fail(w, 404, fmt.Errorf("unknown API route"))
 }

@@ -42,7 +42,8 @@ describe('browser bridge adapters', () => {
 	it('contains no programmatic final-publish click path', () => {
 	const source = readFileSync('src/bridgeUserscript.ts', 'utf8')
 	expect(source).not.toMatch(/\.click\s*\(/)
-	expect(source).toContain('填入（绝不发布）')
+	expect(source).toContain('正在写入当前可见编辑器（绝不发布）')
+	expect(source).toContain('fillVisibleWithMedia(platform, request')
 	expect(source).toContain("attachShadow({ mode: 'closed' })")
   })
 })

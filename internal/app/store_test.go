@@ -243,3 +243,32 @@ func TestTranslationConfigStoresOnlyCredentialReferences(t *testing.T) {
 		t.Fatalf("unexpected persisted credential references: %+v", config)
 	}
 }
+
+func TestDeactivateAccountPreservesHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	p, err := store.CreateProfile(ctx, Profile{Name: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := store.CreateAccount(ctx, Account{ProfileID: p.ID, Platform: "x", Name: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: p.ID, Title: "history"})
+	v, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: a.ID, Text: "old"}, "")
+	if _, err = store.DeactivateAccount(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAccount(ctx, a.ID)
+	if err != nil || !got.Disabled {
+		t.Fatalf("account=%+v err=%v", got, err)
+	}
+	if _, err = store.GetVariant(ctx, v.ID); err != nil {
+		t.Fatalf("variant history lost: %v", err)
+	}
+}
