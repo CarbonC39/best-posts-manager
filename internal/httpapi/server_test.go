@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,6 +120,34 @@ func TestConnectionStartRequiresLoopbackAndSameOrigin(t *testing.T) {
 	server.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUserscriptIsServedSameOriginWithInstallHeaders(t *testing.T) {
+	server := &Server{UserScript: []byte("// @updateURL __BPM_ORIGIN__/userscript/bpm-bridge.user.js")}
+	req := httptest.NewRequest(http.MethodGet, "http://localhost:9191/userscript/bpm-bridge.user.js", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "text/javascript; charset=utf-8" || !strings.Contains(rec.Header().Get("Content-Disposition"), "bpm-bridge.user.js") {
+		t.Fatalf("code=%d headers=%v", rec.Code, rec.Header())
+	}
+	if !strings.Contains(rec.Body.String(), "@updateURL http://localhost:9191/userscript/bpm-bridge.user.js") || strings.Contains(rec.Body.String(), "__BPM_ORIGIN__") {
+		t.Fatalf("userscript update URL was not made same-origin: %s", rec.Body.String())
+	}
+}
+
+func TestRequestLogDoesNotIncludeQueryValues(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	server := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/health?code=do-not-log&state=secret", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	logged := output.String()
+	if !strings.Contains(logged, "path=/api/health") || strings.Contains(logged, "do-not-log") || strings.Contains(logged, "state") {
+		t.Fatalf("unsafe request log: %s", logged)
 	}
 }
 

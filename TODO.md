@@ -81,6 +81,7 @@
 - [x] 本地权限受限 credential Store、v6 migration，以及 Account/TranslationConfig 的引用优先、环境变量 fallback。
 - [x] 设置页动态平台/provider 说明；Mastodon OAuth granular-scope discovery/旧实例 fallback；Misskey MiAuth；过期、重放和失败清理测试。
 - [x] 非官方 `google-gtx` provider（本地 5000 Unicode 字符校验、分段响应、fake-server 测试）；真实 provider/真实账号仍只做手工验收。
+- [x] 将 OAuth/MiAuth 合并到平台账号表单，补齐手动添加反馈与账号列表；从同源 WebUI 安装/更新用户脚本，并增加不记录 query/body/secret 的请求与连接阶段日志。
 
 验收标准：翻译可追溯且原文不变；失去网络或程序重启后能恢复编辑和发布历史；超时不会盲目重复发布；备份可在另一空目录恢复正文、媒体和记录但不泄露 token；常见错误能告诉用户下一步操作。
 

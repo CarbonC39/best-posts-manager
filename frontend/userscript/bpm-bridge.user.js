@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Best Post Manager local bridge
 // @namespace    best-post-manager
-// @version      1.0.0
+// @version      1.1.0
 // @description  Fill visible editors and capture visible posts; final publishing always stays manual.
 // @match        https://x.com/*
 // @match        https://*.x.com/*
@@ -16,6 +16,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
 // @connect      localhost
+// @downloadURL  __BPM_ORIGIN__/userscript/bpm-bridge.user.js
+// @updateURL    __BPM_ORIGIN__/userscript/bpm-bridge.user.js
 // @noframes
 // ==/UserScript==
 (function() {

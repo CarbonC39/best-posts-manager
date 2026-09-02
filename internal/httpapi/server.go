@@ -1,17 +1,20 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"best-post-manager/internal/app"
 	"best-post-manager/internal/bridge"
@@ -23,12 +26,43 @@ import (
 type Server struct {
 	Svc         *service.Service
 	Static      http.Handler
+	UserScript  []byte
 	Bridge      *bridge.Manager
 	Connections *connection.Manager
 	bridgeMu    sync.Mutex
 }
 
+type responseLogger struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseLogger) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *responseLogger) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+func (w *responseLogger) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	logged := &responseLogger{ResponseWriter: w}
+	w = logged
+	started := time.Now()
+	defer func() {
+		status := logged.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		log.Printf("http method=%s path=%s status=%d duration_ms=%d", r.Method, r.URL.Path, status, time.Since(started).Milliseconds())
+	}()
 	if strings.HasPrefix(r.URL.Path, "/bridge/v1/") {
 		s.bridgeScript(w, r)
 		return
@@ -39,6 +73,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(r.URL.Path, "/media/") {
 		s.media(w, r)
+		return
+	}
+	if r.URL.Path == "/userscript/bpm-bridge.user.js" {
+		if len(s.UserScript) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		content := bytes.ReplaceAll(s.UserScript, []byte("__BPM_ORIGIN__"), []byte(scheme+"://"+r.Host))
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Content-Disposition", `inline; filename="bpm-bridge.user.js"`)
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeContent(w, r, "bpm-bridge.user.js", time.Time{}, bytes.NewReader(content))
 		return
 	}
 	if s.Static != nil {

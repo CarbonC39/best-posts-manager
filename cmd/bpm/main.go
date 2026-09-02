@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -166,8 +167,13 @@ func serve(svc *service.Service, args []string) {
 	addr := f.String("addr", "127.0.0.1:8787", "listen address")
 	_ = f.Parse(args)
 	static, _ := fs.Sub(web, "dist")
-	fmt.Println("listening on http://" + *addr)
-	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: http.FileServer(http.FS(static)), Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials)}); e != nil {
+	userScript, err := fs.ReadFile(static, "bpm-bridge.user.js")
+	if err != nil {
+		fatal(fmt.Errorf("embedded userscript: %w", err))
+	}
+	log.Printf("startup address=http://%s", *addr)
+	staticHandler := http.FileServer(http.FS(static))
+	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: staticHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials)}); e != nil {
 		fatal(e)
 	}
 }

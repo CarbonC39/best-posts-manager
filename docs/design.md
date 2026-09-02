@@ -89,6 +89,8 @@ X、微博、小红书和 QQ 空间无法依赖稳定的公开发布 API 时，�
 
 节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发八小时 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次，token 只存内存哈希，撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL、日志或 SQLite。
 
+本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持以后由脚本管理器检查更新。HTTP 日志只记录 method、path、status 和耗时，不记录 query 或 body；连接日志只记录平台与阶段。
+
 管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication，脚本只填充，用户人工发布后回传 URL/ID；超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本没有发布按钮点击权限，也不调用隐藏 API。
 
 本地端点默认只接受一次配对后短期有效的请求，并拒绝任意跨域调用。token 不写入网页内容、URL 或普通日志。脚本应显示连接状态和实际发送的数据摘要，让用户能撤销配对。桥接端点只服务当前本地用户，不是通用远程 API。

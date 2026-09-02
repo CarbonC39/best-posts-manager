@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -138,6 +139,7 @@ func (m *Manager) start(ctx context.Context, req StartRequest, platform string, 
 }
 
 func (m *Manager) StartMastodon(ctx context.Context, req StartRequest, callbackBase string) (StartResult, error) {
+	log.Printf("connection stage=start platform=mastodon")
 	result, err := m.start(ctx, req, "mastodon", callbackBase)
 	if err != nil {
 		return result, err
@@ -195,10 +197,12 @@ func (m *Manager) StartMastodon(ctx context.Context, req StartRequest, callbackB
 	}
 	query := url.Values{"response_type": {"code"}, "client_id": {out.ClientID}, "redirect_uri": {p.callback}, "scope": {scopes}, "state": {result.State}}
 	result.AuthorizationURL = p.baseURL + "/oauth/authorize?" + query.Encode()
+	log.Printf("connection stage=authorization_ready platform=mastodon")
 	return result, nil
 }
 
 func (m *Manager) StartMisskey(ctx context.Context, req StartRequest, callbackBase string) (StartResult, error) {
+	log.Printf("connection stage=start platform=misskey")
 	result, err := m.start(ctx, req, "misskey", callbackBase)
 	if err != nil {
 		return result, err
@@ -210,6 +214,7 @@ func (m *Manager) StartMisskey(ctx context.Context, req StartRequest, callbackBa
 	query := url.Values{"name": {"Best Post Manager"}, "callback": {p.callback}, "permission": {"write:notes,write:drive"}}
 	result.Session = result.State
 	result.AuthorizationURL = p.baseURL + "/miauth/" + result.State + "?" + query.Encode()
+	log.Printf("connection stage=authorization_ready platform=misskey")
 	return result, nil
 }
 
@@ -249,6 +254,7 @@ func (m *Manager) take(key string) (*pending, error) {
 func (m *Manager) remove(key string) { m.mu.Lock(); delete(m.pending, key); m.mu.Unlock() }
 
 func (m *Manager) CallbackMastodon(ctx context.Context, state, code string) (app.Account, error) {
+	log.Printf("connection stage=callback platform=mastodon")
 	if strings.TrimSpace(code) == "" {
 		return app.Account{}, errors.New("authorization code is required")
 	}
@@ -277,6 +283,7 @@ func (m *Manager) CallbackMastodon(ctx context.Context, state, code string) (app
 	return m.saveAccount(ctx, p, out.AccessToken, "", "")
 }
 func (m *Manager) CallbackMisskey(ctx context.Context, session string) (app.Account, error) {
+	log.Printf("connection stage=callback platform=misskey")
 	p, err := m.take(session)
 	if err != nil {
 		return app.Account{}, err
@@ -329,5 +336,6 @@ func (m *Manager) saveAccount(ctx context.Context, p *pending, secret, remoteID,
 		_ = m.Credentials.Delete(ref)
 		return app.Account{}, err
 	}
+	log.Printf("connection stage=account_saved platform=%s", p.platform)
 	return a, nil
 }
