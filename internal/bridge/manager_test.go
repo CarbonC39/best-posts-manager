@@ -59,14 +59,14 @@ func TestPairingFillResultIsOneTimeAndIdempotent(t *testing.T) {
 			t.Fatalf("pending replay %d: %+v", attempt, pending)
 		}
 	}
-	done, err := m.Result(context.Background(), r.ID, "https://x.com/i/1", "remote-1")
+	done, err := m.Result(context.Background(), r.ID, "https://x.com/user/status/1", "remote-1")
 	if err != nil || done.Status != "published" {
 		t.Fatalf("result: %+v %v", done, err)
 	}
-	if _, err = m.Result(context.Background(), r.ID, "https://x.com/i/1", "remote-1"); err != nil {
+	if _, err = m.Result(context.Background(), r.ID, "https://x.com/user/status/1", "remote-1"); err != nil {
 		t.Fatalf("same result should be idempotent: %v", err)
 	}
-	if _, err = m.Result(context.Background(), r.ID, "https://x.com/i/2", "remote-2"); err == nil {
+	if _, err = m.Result(context.Background(), r.ID, "https://x.com/user/status/2", "remote-2"); err == nil {
 		t.Fatal("conflicting result must fail")
 	}
 	if err = m.AuthenticatePairing("wrong", pair.ID, "x", "https://x.com/compose", ""); err == nil {
@@ -98,7 +98,7 @@ func TestFillCanUseLastConnectedPageAndFilledIsIdempotent(t *testing.T) {
 	if _, err = m.Filled(r.ID, "图片未找到"); err != nil {
 		t.Fatalf("filled retry: %v", err)
 	}
-	done, err := m.Result(context.Background(), r.ID, "https://x.com/i/filled", "")
+	done, err := m.Result(context.Background(), r.ID, "https://x.com/user/status/filled", "")
 	if err != nil || done.Status != "published" {
 		t.Fatalf("result after filled: %+v %v", done, err)
 	}
@@ -239,6 +239,20 @@ func TestAllowedPageSuffixes(t *testing.T) {
 		if got := AllowedPage(tc.platform, tc.page); got != tc.ok {
 			t.Errorf("%s %s: got %v", tc.platform, tc.page, got)
 		}
+	}
+}
+
+func TestAllowedResultURLRejectsComposerAndHome(t *testing.T) {
+	for _, raw := range []string{"https://x.com/", "https://x.com/compose/post", "https://x.com/home"} {
+		if AllowedResultURL("x", raw) {
+			t.Fatalf("non-permalink accepted: %s", raw)
+		}
+	}
+	if !AllowedResultURL("x", "https://x.com/example/status/123") {
+		t.Fatal("valid X permalink was rejected")
+	}
+	if !AllowedResultURL("qzone", "https://user.qzone.qq.com/123/mood/abc") {
+		t.Fatal("valid Qzone permalink was rejected")
 	}
 }
 

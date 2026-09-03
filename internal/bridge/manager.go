@@ -399,9 +399,9 @@ func (m *Manager) Pending(pairingID string) []Request {
 	return out
 }
 
-// Filled records that the userscript successfully put content into the visible
-// editor. It does not publish; the publication remains needs_confirmation until
-// the user confirms the post and the script returns a result.
+// Filled records that the userscript successfully handled the visible editor.
+// Even if an explicit auto-publish request clicked the platform button, the
+// publication remains needs_confirmation until the user returns a result.
 func (m *Manager) Filled(id, warning string) (Request, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -439,7 +439,7 @@ func (m *Manager) Result(ctx context.Context, id, resultURL, remoteID string) (R
 		m.mu.Unlock()
 		return Request{}, errors.New("result is only valid for fill requests")
 	}
-	if resultURL != "" && !AllowedPage(r.Platform, resultURL) {
+	if resultURL != "" && !AllowedResultURL(r.Platform, resultURL) {
 		m.mu.Unlock()
 		return Request{}, errors.New("published result URL is not allowed for this platform")
 	}
@@ -567,6 +567,29 @@ func AllowedPage(platform, raw string) bool {
 	}
 	h := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
 	return allowedHost(platform, h)
+}
+
+// AllowedResultURL rejects editor/home URLs that cannot identify a published
+// post. Platform URL formats vary, so only X is path-strict; the other bridges
+// still require a non-root HTTPS URL on the exact platform host.
+func AllowedResultURL(platform, raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !AllowedPage(platform, raw) {
+		return false
+	}
+	path := strings.TrimSuffix(u.EscapedPath(), "/")
+	if path == "" || path == "/" {
+		return false
+	}
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, "/compose") || strings.Contains(lower, "/publish") {
+		return false
+	}
+	if platform == "x" {
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		return len(parts) == 3 && parts[1] == "status" && parts[0] != "" && parts[2] != ""
+	}
+	return true
 }
 func allowedHost(platform, h string) bool {
 	for _, suffix := range map[string][]string{"x": {"x.com", "twitter.com"}, "weibo": {"weibo.com"}, "xiaohongshu": {"xiaohongshu.com"}, "qzone": {"qzone.qq.com"}}[platform] {

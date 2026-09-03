@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { captureVisible, clickKnownPublish, fillVisible, supportedBridgePlatforms } from '../src/bridgeAdapters'
+import { canAutoPublish, captureVisible, clickKnownPublish, fillVisible, supportedBridgePlatforms } from '../src/bridgeAdapters'
 
 describe('browser bridge adapters', () => {
   it('supports the four explicit page platforms and fills visible editors', () => {
@@ -8,8 +8,8 @@ describe('browser bridge adapters', () => {
 	const fixtures: Record<string, string> = {
 	  x: '<div contenteditable="true" data-testid="tweetTextarea_0"></div>',
 	  weibo: '<textarea placeholder="分享新鲜事"></textarea>',
-	  xiaohongshu: '<section><div contenteditable="true"></div></section>',
-	  qzone: '<textarea></textarea>',
+	  xiaohongshu: '<section><div class="ql-editor" contenteditable="true"></div></section>',
+	  qzone: '<textarea placeholder="发表说说"></textarea>',
 	}
     for (const platform of supportedBridgePlatforms) {
 	  document.body.innerHTML = fixtures[platform]
@@ -46,6 +46,8 @@ describe('browser bridge adapters', () => {
 	publish.addEventListener('click', () => { clicked = true })
 	expect(clickKnownPublish('x')).toBeNull()
 	expect(clicked).toBe(true)
+	document.body.innerHTML = '<button data-testid="tweetButton">Post one</button><button data-testid="tweetButtonInline">Post two</button>'
+	expect(clickKnownPublish('x')).toContain('多个发布按钮')
 	document.body.innerHTML = '<button>unrelated</button>'
 	expect(clickKnownPublish('x')).toContain('未自动点击')
 	const source = readFileSync('src/bridgeUserscript.ts', 'utf8')
@@ -53,5 +55,13 @@ describe('browser bridge adapters', () => {
 	expect(source).toContain('正在填入并检查发布条件')
 	expect(source).toContain('fillVisibleWithMedia(platform, request')
 	expect(source).toContain("attachShadow({ mode: 'closed' })")
+	expect(source).toContain("const injectedOrigin = '__BPM_ORIGIN__'")
+	expect(canAutoPublish('x')).toBe(true)
+	expect(canAutoPublish('weibo')).toBe(false)
+  })
+	it('does not fill unrelated generic textareas', () => {
+	document.body.innerHTML = '<textarea placeholder="搜索或评论"></textarea>'
+	expect(() => fillVisible('qzone', 'must not leak')).toThrow('未找到可见编辑框')
+	expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('')
   })
 })

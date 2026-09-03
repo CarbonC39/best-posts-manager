@@ -17,6 +17,19 @@ func TestEmbeddedFrontendIsPresent(t *testing.T) {
 	}
 }
 
+func TestServeAddressMustBeLoopback(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:8787", "[::1]:8787", "localhost:8787"} {
+		if !loopbackListenAddress(addr) {
+			t.Fatalf("loopback address rejected: %s", addr)
+		}
+	}
+	for _, addr := range []string{"0.0.0.0:8787", ":8787", "192.168.1.2:8787"} {
+		if loopbackListenAddress(addr) {
+			t.Fatalf("non-loopback address accepted: %s", addr)
+		}
+	}
+}
+
 func TestCLIApplicationFlow(t *testing.T) {
 	dir := t.TempDir()
 	goCache := filepath.Join(t.TempDir(), "cache")

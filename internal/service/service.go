@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"best-post-manager/internal/app"
@@ -17,6 +20,35 @@ type Service struct {
 	Misskey     *platform.MisskeyClient
 	Bluesky     *platform.BlueskyClient
 	Credentials credential.Store
+}
+
+// ConfirmPublication records a manually verified remote result after an
+// earlier publish attempt had an unknown outcome.
+func (s *Service) ConfirmPublication(ctx context.Context, publicationID, remoteURL, remoteID string) (app.Publication, error) {
+	remoteURL = strings.TrimSpace(remoteURL)
+	parsed, err := url.ParseRequestURI(remoteURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return app.Publication{}, fmt.Errorf("remote_url must be an absolute http or https URL")
+	}
+	p, err := s.Store.GetPublication(ctx, publicationID)
+	if err != nil {
+		return app.Publication{}, err
+	}
+	if p.Status != "needs_confirmation" {
+		return p, fmt.Errorf("%w: only publications needing confirmation can be confirmed", app.ErrConflict)
+	}
+	return s.Store.ConfirmPublication(ctx, publicationID, remoteURL, strings.TrimSpace(remoteID), time.Now().UTC())
+}
+
+func (s *Service) CancelPublication(ctx context.Context, publicationID string) (app.Publication, error) {
+	p, err := s.Store.GetPublication(ctx, publicationID)
+	if err != nil {
+		return app.Publication{}, err
+	}
+	if p.Status != "needs_confirmation" {
+		return p, fmt.Errorf("%w: only publications needing confirmation can be cancelled", app.ErrConflict)
+	}
+	return s.Store.CancelPublication(ctx, publicationID)
 }
 
 func New(s *app.Store) *Service {
@@ -91,6 +123,11 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 	if e != nil {
 		return app.Publication{}, e
 	}
+	if unresolved, unresolvedErr := s.Store.HasUnresolvedPublication(ctx, variantID); unresolvedErr != nil {
+		return app.Publication{}, unresolvedErr
+	} else if unresolved {
+		return app.Publication{}, fmt.Errorf("%w: this version already has an unresolved publication; confirm it before publishing again", app.ErrConflict)
+	}
 	account, e := s.Store.GetAccount(ctx, v.AccountID)
 	if e != nil {
 		return app.Publication{}, e
@@ -112,7 +149,7 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 	}
 	var selected []app.Media
 	for _, m := range media {
-		if m.VariantID == "" || m.VariantID == v.ID {
+		if (m.VariantID == "" || m.VariantID == v.ID) && !m.CreatedAt.After(p.CreatedAt) {
 			selected = append(selected, m)
 		}
 	}
@@ -242,7 +279,7 @@ func (s *Service) Retry(ctx context.Context, publicationID string) (app.Publicat
 	}
 	var selected []app.Media
 	for _, m := range media {
-		if m.VariantID == "" || m.VariantID == v.ID {
+		if (m.VariantID == "" || m.VariantID == v.ID) && !m.CreatedAt.After(p.CreatedAt) {
 			selected = append(selected, m)
 		}
 	}

@@ -14,7 +14,9 @@ const platform = host === 'x.com' || host.endsWith('.x.com') || host === 'twitte
     ? 'weibo' : host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com') ? 'xiaohongshu' : 'qzone'
 const configKey = `bpm-bridge-config-v1-${platform}`
 const saved = GM_getValue<Partial<Config>>(configKey, {})
-const config: Config = { base: saved.base || 'http://127.0.0.1:8787', token: '', pairing: '' }
+const injectedOrigin = '__BPM_ORIGIN__'
+const defaultBase = injectedOrigin.startsWith('http://') || injectedOrigin.startsWith('https://') ? injectedOrigin : 'http://127.0.0.1:8787'
+const config: Config = { base: saved.base || defaultBase, token: '', pairing: '' }
 if (saved.token && saved.pairing) { config.token = saved.token; config.pairing = saved.pairing }
 let current: ScriptRequest | null = null
 let polling = false
@@ -63,7 +65,7 @@ function setMinimized(value: boolean) {
   button.style.width = value ? '46px' : 'auto'
   button.style.height = value ? '46px' : 'auto'
 }
-const addButton = (label: string, action: () => void) => { const button = document.createElement('button'); button.textContent = label; button.addEventListener('click', action); requestBox.appendChild(button) }
+const addButton = (label: string, action: () => void) => { const button = document.createElement('button'); button.textContent = label; button.addEventListener('click', action); requestBox.appendChild(button); return button }
 
 async function connect() {
   config.base = element<HTMLInputElement>('base').value.trim().replace(/\/$/, '')
@@ -81,11 +83,11 @@ async function connect() {
 }
 
 function showCapture(request: ScriptRequest) {
+  const snapshot = captureVisible(platform, location.href)
   const summary = document.createElement('div')
-  summary.textContent = '本地请求：捕获当前可见帖子'
+  summary.textContent = `准备捕获：${snapshot.text.slice(0, 160) || '未读取到正文'}${snapshot.incomplete ? `（${snapshot.incomplete_reason}）` : ''}`
   requestBox.appendChild(summary)
   addButton('确认捕获当前可见内容', () => void (async () => {
-    const snapshot = captureVisible(platform, location.href)
     await call(`/bridge/v1/requests/${request.id}/capture`, { method: 'POST', body: JSON.stringify(snapshot) })
     status(snapshot.incomplete ? `已保存不完整快照：${snapshot.incomplete_reason}` : '已保存当前可见快照')
     current = null
@@ -97,6 +99,18 @@ function showFill(request: ScriptRequest) {
   const summary = document.createElement('div')
   summary.textContent = `请求 ${request.id.slice(0, 8)}：${(request.text || '').slice(0, 80)}；图片 ${request.media?.length || 0} 张`
   requestBox.appendChild(summary)
+  const resultURL = document.createElement('input')
+  resultURL.placeholder = '发布后的帖子永久链接（不是编辑页地址）'
+  requestBox.appendChild(resultURL)
+  const resultButton = addButton('确认已发布并回传链接', () => void (async () => {
+    const url = resultURL.value.trim()
+    if (!url) throw new Error('请先填写发布后的帖子永久链接')
+    await call(`/bridge/v1/requests/${request.id}/result`, { method: 'POST', body: JSON.stringify({ url }) })
+    status('已回传人工确认的发布结果')
+    current = null
+    requestBox.replaceChildren()
+  })().catch((error) => status(`回传失败：${String(error)}`)))
+  resultButton.disabled = true
   status(request.auto_publish ? '已收到本次自动发布请求，正在填入并检查发布条件' : '已收到填入请求，正在写入当前可见编辑器（不会发布）')
   void (async () => {
     try {
@@ -108,6 +122,7 @@ function showFill(request: ScriptRequest) {
         if (publishWarning) failures.push(publishWarning)
       }
       await call(`/bridge/v1/requests/${request.id}/filled`, { method: 'POST', body: JSON.stringify({ warning: failures.join('; ') }) })
+      resultButton.disabled = false
       status(failures.length ? `文字已填入；请人工处理：${failures.join('；')}` : request.auto_publish ? '已填入并点击可见发布按钮；请确认平台结果' : '已填入，请人工检查可见范围和图片顺序后发布')
     } catch (error) {
       await call(`/bridge/v1/requests/${request.id}/error`, { method: 'POST', body: JSON.stringify({ error: String(error) }) })
@@ -116,16 +131,6 @@ function showFill(request: ScriptRequest) {
       requestBox.replaceChildren()
     }
   })()
-  const resultURL = document.createElement('input')
-  resultURL.placeholder = '发布后的帖子永久链接'
-  resultURL.value = location.href
-  requestBox.appendChild(resultURL)
-  addButton('我已人工发布，回传链接', () => void (async () => {
-    await call(`/bridge/v1/requests/${request.id}/result`, { method: 'POST', body: JSON.stringify({ url: resultURL.value.trim() }) })
-    status('已回传人工确认的发布结果')
-    current = null
-    requestBox.replaceChildren()
-  })().catch((error) => status(`回传失败：${String(error)}`)))
 }
 
 async function poll() {
@@ -133,7 +138,7 @@ async function poll() {
   try {
     const requests = await call<ScriptRequest[]>('/bridge/v1/requests')
     const request = requests[0]
-    if (request && request.id !== current?.id) {
+    if (!current && request) {
       current = request
       requestBox.replaceChildren()
       if (request.kind === 'capture') showCapture(request); else showFill(request)

@@ -173,6 +173,104 @@ func TestExternalMarkerDoesNotCallRemote(t *testing.T) {
 	}
 }
 
+func TestMetadataDeletionAndConfirmationEndpoints(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	profile, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	account, _ := st.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: profile.ID, Title: "before"})
+	variant, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	publication, _ := st.CreatePublication(ctx, app.Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation", ErrorCategory: "unknown", ErrorMessage: "unknown"})
+	external, _ := st.CreateExternalPost(ctx, app.ExternalPost{TopicID: topic.ID, Platform: "x", URL: "https://example.test/external"})
+	server := httptest.NewServer(&Server{Svc: service.New(st)})
+	defer server.Close()
+
+	requestJSON := func(method, path string, body any) *http.Response {
+		raw, _ := json.Marshal(body)
+		req, requestErr := http.NewRequest(method, server.URL+path, bytes.NewReader(raw))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		res, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return res
+	}
+
+	res := requestJSON(http.MethodPut, "/api/topics/"+topic.ID, map[string]string{"title": "renamed", "status": "archived"})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("topic update status=%d", res.StatusCode)
+	}
+	var updated app.Topic
+	_ = json.NewDecoder(res.Body).Decode(&updated)
+	_ = res.Body.Close()
+	if updated.Title != "renamed" || updated.Status != "archived" {
+		t.Fatalf("unexpected topic: %+v", updated)
+	}
+	res = requestJSON(http.MethodPut, "/api/topics/"+topic.ID, map[string]string{"title": "renamed", "status": "invalid"})
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid topic status=%d", res.StatusCode)
+	}
+
+	res = requestJSON(http.MethodPost, "/api/publications/"+publication.ID+"/confirm", map[string]string{"remote_url": "/relative"})
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("relative confirmation URL status=%d", res.StatusCode)
+	}
+	res = requestJSON(http.MethodPost, "/api/publications/"+publication.ID+"/confirm", map[string]string{"remote_url": "https://example.test/post/1", "remote_id": "one"})
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("confirmation status=%d", res.StatusCode)
+	}
+	res = requestJSON(http.MethodPost, "/api/publications/"+publication.ID+"/confirm", map[string]string{"remote_url": "https://example.test/post/1"})
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("repeated confirmation status=%d", res.StatusCode)
+	}
+	res = requestJSON(http.MethodPost, "/api/publications/missing/confirm", map[string]string{"remote_url": "https://example.test/post/1"})
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing confirmation status=%d", res.StatusCode)
+	}
+	toCancel, err := st.CreatePublication(ctx, app.Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation", RemoteURL: "https://example.test/uncertain", ErrorCategory: "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = requestJSON(http.MethodPost, "/api/publications/"+toCancel.ID+"/cancel", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("cancellation status=%d", res.StatusCode)
+	}
+	var cancelled app.Publication
+	_ = json.NewDecoder(res.Body).Decode(&cancelled)
+	_ = res.Body.Close()
+	if cancelled.Status != "cancelled" || cancelled.ErrorMessage != "用户确认未发布" || cancelled.RemoteURL != "" {
+		t.Fatalf("unexpected cancelled publication: %+v", cancelled)
+	}
+	res = requestJSON(http.MethodPost, "/api/publications/"+toCancel.ID+"/cancel", nil)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("repeated cancellation status=%d", res.StatusCode)
+	}
+
+	res = requestJSON(http.MethodDelete, "/api/external-posts/"+external.ID, nil)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("external delete status=%d", res.StatusCode)
+	}
+	res = requestJSON(http.MethodDelete, "/api/external-posts/"+external.ID, nil)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing external delete status=%d", res.StatusCode)
+	}
+}
+
 func TestCapabilityIsSelectedFromAccountPlatform(t *testing.T) {
 	ctx := context.Background()
 	st, err := app.Open(ctx, t.TempDir())
@@ -222,5 +320,14 @@ func TestEmptyListResponsesAreJSONArrays(t *testing.T) {
 		if res.StatusCode != http.StatusOK || decodeErr != nil || value == nil {
 			t.Errorf("%s: status=%d value=%#v decode=%v", path, res.StatusCode, value, decodeErr)
 		}
+	}
+}
+
+func TestRejectsNonLoopbackHost(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://attacker.example/api/profiles", nil)
+	recorder := httptest.NewRecorder()
+	(&Server{}).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback Host status=%d", recorder.Code)
 	}
 }

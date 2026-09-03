@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 var credentialEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Store struct {
@@ -29,9 +31,15 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("secure data directory permissions: %w", err)
+	}
 	media := filepath.Join(dataDir, "media")
 	if err := os.MkdirAll(media, 0o700); err != nil {
 		return nil, err
+	}
+	if err := os.Chmod(media, 0o700); err != nil {
+		return nil, fmt.Errorf("secure media directory permissions: %w", err)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "best-post-manager.db"))
 	if err != nil {
@@ -311,6 +319,23 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.Name == "" || !supportedPlatform(a.Platform) {
 		return a, fmt.Errorf("a name and supported platform are required")
 	}
+	if a.RemoteID != "" {
+		var existingID string
+		var disabled int
+		err := s.DB.QueryRowContext(ctx, `SELECT id,disabled FROM accounts WHERE profile_id=? AND platform=? AND remote_id=?`, a.ProfileID, a.Platform, a.RemoteID).Scan(&existingID, &disabled)
+		if err == nil {
+			if disabled == 0 {
+				return a, fmt.Errorf("%w: this platform account is already connected", ErrConflict)
+			}
+			if _, err = s.DB.ExecContext(ctx, `UPDATE accounts SET name=?,base_url=?,token_env=?,credential_ref=?,disabled=0 WHERE id=?`, a.Name, a.BaseURL, a.TokenEnv, a.CredentialRef, existingID); err != nil {
+				return a, err
+			}
+			return s.GetAccount(ctx, existingID)
+		}
+		if err != sql.ErrNoRows {
+			return a, err
+		}
+	}
 	if a.ID == "" {
 		a.ID = id()
 	}
@@ -392,6 +417,9 @@ func (s *Store) CreateTopic(ctx context.Context, t Topic) (Topic, error) {
 	if t.Status == "" {
 		t.Status = "active"
 	}
+	if !validTopicStatus(t.Status) {
+		return t, fmt.Errorf("topic status must be active or archived")
+	}
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now().UTC()
 	}
@@ -409,6 +437,36 @@ func (s *Store) CreateTopic(ctx context.Context, t Topic) (Topic, error) {
 		return t, e
 	}
 	return t, tx.Commit()
+}
+func validTopicStatus(status string) bool { return status == "active" || status == "archived" }
+
+// UpdateTopic changes the user-managed topic metadata without allowing its
+// profile or creation time to be replaced by request data.
+func (s *Store) UpdateTopic(ctx context.Context, t Topic) (Topic, error) {
+	old, err := s.GetTopic(ctx, t.ID)
+	if err != nil {
+		return Topic{}, err
+	}
+	t.Title = strings.TrimSpace(t.Title)
+	if t.Title == "" {
+		return Topic{}, fmt.Errorf("topic title is required")
+	}
+	if !validTopicStatus(t.Status) {
+		return Topic{}, fmt.Errorf("topic status must be active or archived")
+	}
+	stamp := now()
+	result, err := s.DB.ExecContext(ctx, `UPDATE topics SET title=?,status=?,updated_at=? WHERE id=?`, t.Title, t.Status, stamp, t.ID)
+	if err != nil {
+		return Topic{}, err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		if rowsErr != nil {
+			return Topic{}, rowsErr
+		}
+		return Topic{}, ErrNotFound
+	}
+	t.ProfileID, t.CreatedAt, t.UpdatedAt = old.ProfileID, old.CreatedAt, parseTime(stamp)
+	return t, nil
 }
 func (s *Store) ListTopics(ctx context.Context, profileID string) ([]Topic, error) {
 	q := `SELECT id,profile_id,title,status,created_at,updated_at FROM topics`
@@ -465,12 +523,28 @@ func (s *Store) UpdateBaseDraft(ctx context.Context, b BaseDraft) (BaseDraft, er
 	if e != nil {
 		return b, e
 	}
+	if b.Text == old.Text && b.Format == old.Format && b.Language == old.Language {
+		return old, nil
+	}
 	stamp := now()
-	_, e = s.DB.ExecContext(ctx, `UPDATE base_drafts SET text=?,format=?,language=?,revision=?,updated_at=? WHERE topic_id=?`, b.Text, b.Format, b.Language, old.Revision+1, stamp, b.TopicID)
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return b, e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, `UPDATE base_drafts SET text=?,format=?,language=?,revision=?,updated_at=? WHERE topic_id=?`, b.Text, b.Format, b.Language, old.Revision+1, stamp, b.TopicID); e == nil {
+		_, e = tx.ExecContext(ctx, `UPDATE topics SET updated_at=? WHERE id=?`, stamp, b.TopicID)
+	}
+	if e != nil {
+		return b, e
+	}
+	if e = tx.Commit(); e != nil {
+		return b, e
+	}
 	b.ID = old.ID
 	b.Revision = old.Revision + 1
 	b.UpdatedAt = parseTime(stamp)
-	return b, e
+	return b, nil
 }
 func (s *Store) accountTopicOK(ctx context.Context, topicID, accountID string) bool {
 	var x int
@@ -516,9 +590,10 @@ func (s *Store) CreateVariant(ctx context.Context, v Variant, sourceVariantID st
 func (s *Store) getVariant(ctx context.Context, vid string) (Variant, error) {
 	var v Variant
 	var c, u string
-	var local int
-	e := s.DB.QueryRowContext(ctx, `SELECT id,topic_id,account_id,text,format,status,relation,source_revision,visibility,spoiler_text,local_only,created_at,updated_at FROM variants WHERE id=?`, vid).Scan(&v.ID, &v.TopicID, &v.AccountID, &v.Text, &v.Format, &v.Status, &v.Relation, &v.SourceRevision, &v.Visibility, &v.SpoilerText, &local, &c, &u)
+	var local, published int
+	e := s.DB.QueryRowContext(ctx, `SELECT v.id,v.topic_id,v.account_id,v.text,v.format,v.status,v.relation,v.source_revision,v.visibility,v.spoiler_text,v.local_only,v.created_at,v.updated_at,EXISTS(SELECT 1 FROM publications p WHERE p.variant_id=v.id) FROM variants v WHERE v.id=?`, vid).Scan(&v.ID, &v.TopicID, &v.AccountID, &v.Text, &v.Format, &v.Status, &v.Relation, &v.SourceRevision, &v.Visibility, &v.SpoilerText, &local, &c, &u, &published)
 	v.LocalOnly = local != 0
+	v.Published = published != 0
 	if e != nil {
 		if e == sql.ErrNoRows {
 			e = ErrNotFound
@@ -576,6 +651,9 @@ func (s *Store) UpdateVariant(ctx context.Context, v Variant) (Variant, error) {
 	if e != nil {
 		return v, e
 	}
+	if old.Published {
+		return old, fmt.Errorf("%w: this version has publication history; copy it to a new version before editing", ErrConflict)
+	}
 	if old.Relation == "linked" {
 		v.Relation = "detached"
 		v.SourceRevision = ""
@@ -605,7 +683,20 @@ func (s *Store) UpdateVariant(ctx context.Context, v Variant) (Variant, error) {
 		v.Format, v.LocalOnly = "plain", false
 	}
 	stamp := now()
-	_, e = s.DB.ExecContext(ctx, `UPDATE variants SET text=?,format=?,status=?,relation=?,source_revision=?,visibility=?,spoiler_text=?,local_only=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.Status, v.Relation, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), stamp, v.ID)
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return v, e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, `UPDATE variants SET text=?,format=?,status=?,relation=?,source_revision=?,visibility=?,spoiler_text=?,local_only=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.Status, v.Relation, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), stamp, v.ID); e == nil {
+		_, e = tx.ExecContext(ctx, `UPDATE topics SET updated_at=? WHERE id=?`, stamp, old.TopicID)
+	}
+	if e != nil {
+		return v, e
+	}
+	if e = tx.Commit(); e != nil {
+		return v, e
+	}
 	v.TopicID, v.AccountID, v.CreatedAt = old.TopicID, old.AccountID, old.CreatedAt
 	v.UpdatedAt = parseTime(stamp)
 	v.Outdated = false
@@ -653,6 +744,9 @@ func (s *Store) ApplyVariantUpdate(ctx context.Context, vid string) (Variant, er
 	if e != nil {
 		return v, e
 	}
+	if v.Published {
+		return v, fmt.Errorf("%w: this version has publication history; copy it to a new version before applying draft changes", ErrConflict)
+	}
 	if v.Relation != "linked" {
 		return v, fmt.Errorf("only linked variants can apply base draft updates")
 	}
@@ -668,10 +762,23 @@ func (s *Store) ApplyVariantUpdate(ctx context.Context, vid string) (Variant, er
 }
 func (s *Store) updateLinked(ctx context.Context, v Variant) (Variant, error) {
 	stamp := now()
-	_, e := s.DB.ExecContext(ctx, `UPDATE variants SET text=?,format=?,relation='linked',source_revision=?,visibility=?,spoiler_text=?,local_only=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), stamp, v.ID)
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return v, e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, `UPDATE variants SET text=?,format=?,relation='linked',source_revision=?,visibility=?,spoiler_text=?,local_only=?,updated_at=? WHERE id=?`, v.Text, v.Format, v.SourceRevision, v.Visibility, v.SpoilerText, boolInt(v.LocalOnly), stamp, v.ID); e == nil {
+		_, e = tx.ExecContext(ctx, `UPDATE topics SET updated_at=? WHERE id=?`, stamp, v.TopicID)
+	}
+	if e != nil {
+		return v, e
+	}
+	if e = tx.Commit(); e != nil {
+		return v, e
+	}
 	v.UpdatedAt = parseTime(stamp)
 	v.Outdated = false
-	return v, e
+	return v, nil
 }
 func (s *Store) AddMedia(ctx context.Context, m Media) (Media, error) {
 	if !strings.HasPrefix(strings.ToLower(m.MIME), "image/") {
@@ -695,6 +802,9 @@ func (s *Store) AddMedia(ctx context.Context, m Media) (Media, error) {
 		}
 		if variant.TopicID != m.TopicID {
 			return m, fmt.Errorf("media variant must belong to the same topic")
+		}
+		if variant.Published {
+			return m, fmt.Errorf("%w: this version has publication history; attach media to a new version instead", ErrConflict)
 		}
 	}
 	var count int
@@ -741,12 +851,45 @@ func (s *Store) ListMedia(ctx context.Context, topicID string) ([]Media, error) 
 // DeleteMedia removes one local media record and its file. Files are accepted
 // only when they are direct children of the configured media directory.
 func (s *Store) DeleteMedia(ctx context.Context, mediaID string) error {
-	var path string
-	if err := s.DB.QueryRowContext(ctx, `SELECT path FROM media WHERE id=?`, mediaID).Scan(&path); err != nil {
+	var path, topicID, variantID, createdAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT path,topic_id,COALESCE(variant_id,''),created_at FROM media WHERE id=?`, mediaID).Scan(&path, &topicID, &variantID, &createdAt); err != nil {
 		if err == sql.ErrNoRows {
 			return ErrNotFound
 		}
 		return err
+	}
+	var historicalUses int
+	if variantID != "" {
+		if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM publications WHERE variant_id=?`, variantID).Scan(&historicalUses); err != nil {
+			return err
+		}
+	} else {
+		rows, err := s.DB.QueryContext(ctx, `SELECT p.created_at FROM publications p JOIN variants v ON v.id=p.variant_id WHERE v.topic_id=?`, topicID)
+		if err != nil {
+			return err
+		}
+		mediaCreatedAt := parseTime(createdAt)
+		for rows.Next() {
+			var publicationCreatedAt string
+			if err = rows.Scan(&publicationCreatedAt); err != nil {
+				rows.Close()
+				return err
+			}
+			if !parseTime(publicationCreatedAt).Before(mediaCreatedAt) {
+				historicalUses++
+				break
+			}
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+	}
+	if historicalUses > 0 {
+		return fmt.Errorf("%w: media is part of publication history and cannot be deleted", ErrConflict)
 	}
 	if filepath.Dir(path) != s.MediaDir || filepath.Base(path) == "." {
 		return errors.New("media path is outside the local media directory")
@@ -794,7 +937,7 @@ func (s *Store) DeleteVariant(ctx context.Context, variantID string) error {
 		return err
 	}
 	if publications > 0 {
-		return errors.New("variant has publication history and cannot be deleted; keep it for audit")
+		return fmt.Errorf("%w: variant has publication history and cannot be deleted; copy it to a new version instead", ErrConflict)
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT path FROM media WHERE variant_id=?`, variantID)
 	if err != nil {
@@ -873,12 +1016,80 @@ func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publicati
 	if p.IdempotencyKey == "" {
 		p.IdempotencyKey = p.VariantID + ":" + p.AccountID + ":" + p.CreatedAt.Format(time.RFC3339Nano)
 	}
-	_, e := s.DB.ExecContext(ctx, `INSERT INTO publications(id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.VariantID, p.AccountID, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, p.IdempotencyKey, p.Source, "", p.CreatedAt.Format(time.RFC3339Nano))
-	return p, e
+	insert := func(exec interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}) error {
+		_, err := exec.ExecContext(ctx, `INSERT INTO publications(id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.VariantID, p.AccountID, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, p.IdempotencyKey, p.Source, "", p.CreatedAt.Format(time.RFC3339Nano))
+		return err
+	}
+	if p.Status != "pending" && p.Status != "publishing" && p.Status != "needs_confirmation" {
+		return p, insert(s.DB)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return p, err
+	}
+	defer tx.Rollback()
+	var unresolved int
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM publications WHERE variant_id=? AND status IN ('pending','publishing','needs_confirmation'))`, p.VariantID).Scan(&unresolved); err != nil {
+		return p, err
+	}
+	if unresolved != 0 {
+		return p, fmt.Errorf("%w: this version already has an unresolved publication", ErrConflict)
+	}
+	if err = insert(tx); err != nil {
+		return p, err
+	}
+	return p, tx.Commit()
+}
+
+func (s *Store) HasUnresolvedPublication(ctx context.Context, variantID string) (bool, error) {
+	var exists int
+	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM publications WHERE variant_id=? AND status IN ('pending','publishing','needs_confirmation'))`, variantID).Scan(&exists)
+	return exists != 0, err
 }
 func (s *Store) UpdatePublication(ctx context.Context, p Publication) error {
 	_, e := s.DB.ExecContext(ctx, `UPDATE publications SET status=?,remote_id=?,remote_url=?,remote_cid=?,error_category=?,error_message=?,published_at=? WHERE id=?`, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, formatTime(p.PublishedAt), p.ID)
 	return e
+}
+
+// ConfirmPublication atomically resolves an unknown publication outcome.
+func (s *Store) ConfirmPublication(ctx context.Context, publicationID, remoteURL, remoteID string, publishedAt time.Time) (Publication, error) {
+	result, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='published',remote_id=?,remote_url=?,error_category='',error_message='',published_at=? WHERE id=? AND status='needs_confirmation'`, remoteID, remoteURL, formatTime(publishedAt), publicationID)
+	if err != nil {
+		return Publication{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Publication{}, err
+	}
+	if affected == 0 {
+		if _, err = s.GetPublication(ctx, publicationID); err != nil {
+			return Publication{}, err
+		}
+		return Publication{}, fmt.Errorf("%w: only publications needing confirmation can be confirmed", ErrConflict)
+	}
+	return s.GetPublication(ctx, publicationID)
+}
+
+// CancelPublication records that the user checked the remote platform and
+// confirmed the unknown publish attempt did not create a post.
+func (s *Store) CancelPublication(ctx context.Context, publicationID string) (Publication, error) {
+	result, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='cancelled',remote_id='',remote_url='',remote_cid='',error_category='',error_message='用户确认未发布',published_at='' WHERE id=? AND status='needs_confirmation'`, publicationID)
+	if err != nil {
+		return Publication{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Publication{}, err
+	}
+	if affected == 0 {
+		if _, err = s.GetPublication(ctx, publicationID); err != nil {
+			return Publication{}, err
+		}
+		return Publication{}, fmt.Errorf("%w: only publications needing confirmation can be cancelled", ErrConflict)
+	}
+	return s.GetPublication(ctx, publicationID)
 }
 
 func (s *Store) GetPublication(ctx context.Context, pid string) (Publication, error) {
@@ -925,6 +1136,14 @@ func (s *Store) CreateExternalPost(ctx context.Context, p ExternalPost) (Externa
 	if strings.TrimSpace(p.Platform) == "" || (strings.TrimSpace(p.URL) == "" && strings.TrimSpace(p.RemoteID) == "") {
 		return p, fmt.Errorf("platform and URL or remote ID are required")
 	}
+	p.Platform = strings.TrimSpace(p.Platform)
+	p.URL = strings.TrimSpace(p.URL)
+	if p.URL != "" {
+		parsed, parseErr := url.ParseRequestURI(p.URL)
+		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return p, fmt.Errorf("URL must be an absolute http or https URL")
+		}
+	}
 	if p.AccountID != "" {
 		account, accountErr := s.GetAccount(ctx, p.AccountID)
 		if accountErr != nil {
@@ -932,6 +1151,9 @@ func (s *Store) CreateExternalPost(ctx context.Context, p ExternalPost) (Externa
 		}
 		if account.ProfileID != topic.ProfileID {
 			return p, fmt.Errorf("external post account must belong to the topic profile")
+		}
+		if account.Platform != p.Platform {
+			return p, fmt.Errorf("external post platform must match the selected account")
 		}
 	}
 	if p.ID == "" {
@@ -981,6 +1203,21 @@ func (s *Store) ListExternalPosts(ctx context.Context, topicID string) ([]Extern
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) DeleteExternalPost(ctx context.Context, externalPostID string) error {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM external_posts WHERE id=?`, externalPostID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) CreateTranslationConfig(ctx context.Context, c TranslationConfig) (TranslationConfig, error) {

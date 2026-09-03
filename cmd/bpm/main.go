@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -166,6 +167,9 @@ func serve(svc *service.Service, args []string) {
 	f := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := f.String("addr", "127.0.0.1:8787", "listen address")
 	_ = f.Parse(args)
+	if !loopbackListenAddress(*addr) {
+		fatal(fmt.Errorf("serve address must use localhost or a loopback IP; remote access is not supported"))
+	}
 	static, _ := fs.Sub(web, "dist")
 	userScript, err := fs.ReadFile(static, "bpm-bridge.user.js")
 	if err != nil {
@@ -176,6 +180,15 @@ func serve(svc *service.Service, args []string) {
 	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: staticHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials)}); e != nil {
 		fatal(e)
 	}
+}
+
+func loopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	return strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
 }
 func profile(ctx context.Context, s *app.Store, args []string) {
 	if len(args) > 0 && args[0] == "add" {

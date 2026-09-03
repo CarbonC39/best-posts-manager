@@ -153,6 +153,70 @@ func TestPublishNetworkFailureNeedsConfirmation(t *testing.T) {
 	}
 }
 
+func TestConfirmPublicationValidatesURLAndState(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	profile, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	account, _ := st.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	pending, _ := st.CreatePublication(ctx, app.Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation", ErrorCategory: "unknown", ErrorMessage: "unknown outcome"})
+	svc := New(st)
+	for _, remoteURL := range []string{"", "/relative", "ftp://example.test/post", "https:///missing-host"} {
+		if _, err = svc.ConfirmPublication(ctx, pending.ID, remoteURL, ""); err == nil {
+			t.Fatalf("invalid URL accepted: %q", remoteURL)
+		}
+	}
+	confirmed, err := svc.ConfirmPublication(ctx, pending.ID, "https://example.test/post/1", " optional-id ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Status != "published" || confirmed.RemoteID != "optional-id" || confirmed.PublishedAt.IsZero() {
+		t.Fatalf("unexpected confirmation: %+v", confirmed)
+	}
+	if _, err = svc.ConfirmPublication(ctx, pending.ID, "https://example.test/post/1", ""); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("published record should conflict, got %v", err)
+	}
+	if _, err = svc.ConfirmPublication(ctx, "missing", "https://example.test/post/1", ""); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("missing publication should be not found, got %v", err)
+	}
+	toCancel, err := st.CreatePublication(ctx, app.Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation", RemoteURL: "https://example.test/uncertain", ErrorCategory: "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := svc.CancelPublication(ctx, toCancel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != "cancelled" || cancelled.ErrorMessage != "用户确认未发布" || cancelled.RemoteURL != "" {
+		t.Fatalf("unexpected cancellation: %+v", cancelled)
+	}
+	if _, err = svc.CancelPublication(ctx, toCancel.ID); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("cancelled record should conflict, got %v", err)
+	}
+}
+
+func TestPublishRejectsAnUnresolvedPublication(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	profile, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	account, _ := st.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	_, _ = st.CreatePublication(ctx, app.Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation"})
+	if _, err = New(st).Publish(ctx, variant.ID); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("unresolved duplicate publication should conflict, got %v", err)
+	}
+}
+
 func TestMediaNetworkFailureIsRetryableNotUnknown(t *testing.T) {
 	t.Setenv("BPM_TEST_TOKEN", "secret")
 	ctx := context.Background()
@@ -213,6 +277,13 @@ func TestRetryReusesPublicationAndIdempotencyKey(t *testing.T) {
 	failed, err := svc.Publish(ctx, v.ID)
 	if err == nil || failed.Status != "failed" || failed.ErrorCategory != "retryable" {
 		t.Fatalf("expected retryable failure: %+v %v", failed, err)
+	}
+	latePath := filepath.Join(st.MediaDir, "late-image")
+	if err = os.WriteFile(latePath, []byte("late"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.AddMedia(ctx, app.Media{TopicID: topic.ID, Filename: "late.png", MIME: "image/png", Path: latePath}); err != nil {
+		t.Fatal(err)
 	}
 	retried, err := svc.Retry(ctx, failed.ID)
 	if err != nil {

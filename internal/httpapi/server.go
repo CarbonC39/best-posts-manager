@@ -63,6 +63,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("http method=%s path=%s status=%d duration_ms=%d", r.Method, r.URL.Path, status, time.Since(started).Milliseconds())
 	}()
+	if !localRequestHost(r.Host) {
+		fail(w, http.StatusForbidden, fmt.Errorf("local service only accepts loopback hosts"))
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/bridge/v1/") {
 		s.bridgeScript(w, r)
 		return
@@ -171,6 +175,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				status := 400
 				if errors.Is(e, app.ErrNotFound) {
 					status = 404
+				} else if errors.Is(e, app.ErrConflict) {
+					status = http.StatusConflict
 				}
 				fail(w, status, e)
 			} else {
@@ -258,7 +264,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			v, e := s.Svc.Publish(ctx, req.VariantID)
 			if e != nil {
-				writeJSON(w, 400, map[string]any{"error": e.Error(), "publication": v})
+				status := http.StatusBadRequest
+				if errors.Is(e, app.ErrNotFound) {
+					status = http.StatusNotFound
+				} else if errors.Is(e, app.ErrConflict) {
+					status = http.StatusConflict
+				}
+				writeJSON(w, status, map[string]any{"error": e.Error(), "publication": v})
 				return
 			}
 			writeJSON(w, 201, v)
@@ -277,6 +289,60 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"error": e.Error(), "publication": v})
 		} else {
 			writeJSON(w, 200, v)
+		}
+		return
+	case strings.HasPrefix(path, "publications/") && strings.HasSuffix(path, "/confirm"):
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		publicationID := strings.TrimSuffix(strings.TrimPrefix(path, "publications/"), "/confirm")
+		if publicationID == "" || strings.Contains(publicationID, "/") {
+			fail(w, http.StatusNotFound, app.ErrNotFound)
+			return
+		}
+		var req struct {
+			RemoteURL string `json:"remote_url"`
+			RemoteID  string `json:"remote_id"`
+		}
+		if e := decode(r, &req); e != nil {
+			fail(w, http.StatusBadRequest, e)
+			return
+		}
+		v, e := s.Svc.ConfirmPublication(ctx, publicationID, req.RemoteURL, req.RemoteID)
+		if e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, v)
+		}
+		return
+	case strings.HasPrefix(path, "publications/") && strings.HasSuffix(path, "/cancel"):
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		publicationID := strings.TrimSuffix(strings.TrimPrefix(path, "publications/"), "/cancel")
+		if publicationID == "" || strings.Contains(publicationID, "/") {
+			fail(w, http.StatusNotFound, app.ErrNotFound)
+			return
+		}
+		v, e := s.Svc.CancelPublication(ctx, publicationID)
+		if e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, v)
 		}
 		return
 	case path == "external-posts" && r.Method == http.MethodGet:
@@ -299,7 +365,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		v, e := s.Svc.ImportExternal(ctx, req.TopicID, req.AccountID, req.Reference)
 		if e != nil {
-			fail(w, 400, e)
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
 		} else {
 			writeJSON(w, 201, v)
 		}
@@ -315,9 +385,33 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		v, e := s.Svc.Store.CreateExternalPost(ctx, v)
 		if e != nil {
-			fail(w, 400, e)
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
 		} else {
 			writeJSON(w, 201, v)
+		}
+		return
+	case strings.HasPrefix(path, "external-posts/"):
+		if r.Method != http.MethodDelete {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		externalPostID := strings.TrimPrefix(path, "external-posts/")
+		if externalPostID == "" || strings.Contains(externalPostID, "/") {
+			fail(w, http.StatusNotFound, app.ErrNotFound)
+			return
+		}
+		if e := s.Svc.Store.DeleteExternalPost(ctx, externalPostID); e != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		}
 		return
 	case path == "translation-configs" && r.Method == http.MethodGet:
@@ -425,7 +519,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		id := strings.TrimPrefix(path, "media/")
 		if err := s.Svc.Store.DeleteMedia(ctx, id); err != nil {
-			fail(w, 400, err)
+			status := http.StatusBadRequest
+			if errors.Is(err, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(err, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, err)
 		} else {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		}
@@ -544,11 +644,30 @@ func localRequestHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 func (s *Server) topic(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
 	if !strings.HasSuffix(r.URL.Path, "/draft") {
-		fail(w, 404, app.ErrNotFound)
+		if r.Method != http.MethodPut {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		var v app.Topic
+		if e := decode(r, &v); e != nil {
+			fail(w, http.StatusBadRequest, e)
+			return
+		}
+		v.ID = id
+		v, e := s.Svc.Store.UpdateTopic(ctx, v)
+		if e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, v)
+		}
 		return
 	}
-	ctx := r.Context()
 	if r.Method == http.MethodGet {
 		v, e := s.Svc.Store.GetBaseDraft(ctx, id)
 		if e != nil {
@@ -585,7 +704,13 @@ func (s *Server) variant(w http.ResponseWriter, r *http.Request, id string) {
 		id = strings.TrimSuffix(id, "/apply")
 		v, e := s.Svc.Store.ApplyVariantUpdate(r.Context(), id)
 		if e != nil {
-			fail(w, 400, e)
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
 		} else {
 			writeJSON(w, 200, v)
 		}
@@ -609,7 +734,13 @@ func (s *Server) variant(w http.ResponseWriter, r *http.Request, id string) {
 		v.ID = id
 		v, e := s.Svc.Store.UpdateVariant(r.Context(), v)
 		if e != nil {
-			fail(w, 400, e)
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
 		} else {
 			writeJSON(w, 200, v)
 		}
@@ -617,7 +748,13 @@ func (s *Server) variant(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if r.Method == http.MethodDelete {
 		if e := s.Svc.Store.DeleteVariant(r.Context(), id); e != nil {
-			fail(w, 400, e)
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
 		} else {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		}
@@ -630,8 +767,14 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 413, fmt.Errorf("image exceeds 32 MiB"))
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 33<<20)
 	if e := r.ParseMultipartForm(16 << 20); e != nil {
-		fail(w, 400, e)
+		var tooLarge *http.MaxBytesError
+		if errors.As(e, &tooLarge) {
+			fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("image exceeds 32 MiB"))
+		} else {
+			fail(w, 400, e)
+		}
 		return
 	}
 	if r.MultipartForm != nil {

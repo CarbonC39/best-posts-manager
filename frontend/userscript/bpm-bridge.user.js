@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Best Post Manager local bridge
 // @namespace    best-post-manager
-// @version      1.3.0
-// @description  Fill visible editors, optionally publish on explicit request, and capture visible posts.
+// @version      1.4.0
+// @description  Fill visible editors, safely publish X on explicit request, and capture visible posts.
 // @match        https://x.com/*
 // @match        https://*.x.com/*
 // @match        https://twitter.com/*
@@ -25,10 +25,10 @@
 (function() {
   "use strict";
   const adapters = {
-    x: { selectors: ['[data-testid="tweetTextarea_0"]', 'textarea[aria-label*="Post"]', "textarea", '[contenteditable="true"]'], captureSelectors: ['article [data-testid="tweetText"]', "article"], mediaSelectors: ['input[type="file"]'], publishSelectors: ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'] },
-    weibo: { selectors: ['textarea[placeholder*="分享"]', "textarea", '[contenteditable="true"]'], captureSelectors: [".WB_text", '[node-type="feed_list_content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['button[node-type="submit"]', '[node-type="submit"]'] },
-    xiaohongshu: { selectors: ["textarea", '[contenteditable="true"]'], captureSelectors: [".note-content", '[class*="note-content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['button[class*="publish"]', '[role="button"][class*="publish"]'] },
-    qzone: { selectors: ["textarea", '[contenteditable="true"]'], captureSelectors: [".feed-content", '[class*="content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['button[node-type="submit"]', '[role="button"][aria-label*="发表"]'] }
+    x: { selectors: ['[data-testid="tweetTextarea_0"]', 'textarea[aria-label*="Post"]'], captureSelectors: ['article [data-testid="tweetText"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'] },
+    weibo: { selectors: ['textarea[placeholder*="分享"]', '[contenteditable="true"][node-type*="text"]'], captureSelectors: [".WB_text", '[node-type="feed_list_content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: [] },
+    xiaohongshu: { selectors: ['.ql-editor[contenteditable="true"]', 'textarea[placeholder*="正文"]'], captureSelectors: [".note-content", '[class*="note-content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: [] },
+    qzone: { selectors: ['textarea[placeholder*="说说"]', '[contenteditable="true"][class*="textinput"]'], captureSelectors: [".feed-content", '[class*="feed-content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: [] }
   };
   function adapter(platform2) {
     const value = adapters[platform2];
@@ -61,17 +61,21 @@
     return mediaInput ? { mediaInput } : {};
   }
   function clickKnownPublish(platform2) {
+    var _a;
+    const viable = /* @__PURE__ */ new Set();
     for (const selector of adapter(platform2).publishSelectors) {
       const candidates = document.querySelectorAll(selector);
       for (const element2 of candidates) {
         if (element2.hidden || element2.getAttribute("aria-hidden") === "true" || element2.getAttribute("aria-disabled") === "true" || element2.disabled) continue;
         const style = getComputedStyle(element2);
         if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
-        element2.click();
-        return null;
+        viable.add(element2);
       }
     }
-    return "当前页面未找到明确的可见发布按钮，未自动点击；请人工发布";
+    if (viable.size === 0) return "当前页面未找到明确的可见发布按钮，未自动点击；请人工发布";
+    if (viable.size > 1) return "当前页面同时出现多个发布按钮，无法安全确定目标，未自动点击";
+    (_a = viable.values().next().value) == null ? void 0 : _a.click();
+    return null;
   }
   async function fillVisibleWithMedia(platform2, request, fetcher = fetch) {
     var _a;
@@ -134,7 +138,9 @@
   const platform = host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com") ? "x" : host === "weibo.com" || host.endsWith(".weibo.com") ? "weibo" : host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com") ? "xiaohongshu" : "qzone";
   const configKey = `bpm-bridge-config-v1-${platform}`;
   const saved = GM_getValue(configKey, {});
-  const config = { base: saved.base || "http://127.0.0.1:8787", token: "", pairing: "" };
+  const injectedOrigin = "__BPM_ORIGIN__";
+  const defaultBase = injectedOrigin.startsWith("http://") || injectedOrigin.startsWith("https://") ? injectedOrigin : "http://127.0.0.1:8787";
+  const config = { base: saved.base || defaultBase, token: "", pairing: "" };
   if (saved.token && saved.pairing) {
     config.token = saved.token;
     config.pairing = saved.pairing;
@@ -195,6 +201,7 @@
     button.textContent = label;
     button.addEventListener("click", action);
     requestBox.appendChild(button);
+    return button;
   };
   async function connect() {
     config.base = element("base").value.trim().replace(/\/$/, "");
@@ -214,11 +221,11 @@
     }
   }
   function showCapture(request) {
+    const snapshot = captureVisible(platform, location.href);
     const summary = document.createElement("div");
-    summary.textContent = "本地请求：捕获当前可见帖子";
+    summary.textContent = `准备捕获：${snapshot.text.slice(0, 160) || "未读取到正文"}${snapshot.incomplete ? `（${snapshot.incomplete_reason}）` : ""}`;
     requestBox.appendChild(summary);
     addButton("确认捕获当前可见内容", () => void (async () => {
-      const snapshot = captureVisible(platform, location.href);
       await call(`/bridge/v1/requests/${request.id}/capture`, { method: "POST", body: JSON.stringify(snapshot) });
       status(snapshot.incomplete ? `已保存不完整快照：${snapshot.incomplete_reason}` : "已保存当前可见快照");
       current = null;
@@ -230,6 +237,18 @@
     const summary = document.createElement("div");
     summary.textContent = `请求 ${request.id.slice(0, 8)}：${(request.text || "").slice(0, 80)}；图片 ${((_a = request.media) == null ? void 0 : _a.length) || 0} 张`;
     requestBox.appendChild(summary);
+    const resultURL = document.createElement("input");
+    resultURL.placeholder = "发布后的帖子永久链接（不是编辑页地址）";
+    requestBox.appendChild(resultURL);
+    const resultButton = addButton("确认已发布并回传链接", () => void (async () => {
+      const url = resultURL.value.trim();
+      if (!url) throw new Error("请先填写发布后的帖子永久链接");
+      await call(`/bridge/v1/requests/${request.id}/result`, { method: "POST", body: JSON.stringify({ url }) });
+      status("已回传人工确认的发布结果");
+      current = null;
+      requestBox.replaceChildren();
+    })().catch((error) => status(`回传失败：${String(error)}`)));
+    resultButton.disabled = true;
     status(request.auto_publish ? "已收到本次自动发布请求，正在填入并检查发布条件" : "已收到填入请求，正在写入当前可见编辑器（不会发布）");
     void (async () => {
       var _a2;
@@ -242,6 +261,7 @@
           if (publishWarning) failures.push(publishWarning);
         }
         await call(`/bridge/v1/requests/${request.id}/filled`, { method: "POST", body: JSON.stringify({ warning: failures.join("; ") }) });
+        resultButton.disabled = false;
         status(failures.length ? `文字已填入；请人工处理：${failures.join("；")}` : request.auto_publish ? "已填入并点击可见发布按钮；请确认平台结果" : "已填入，请人工检查可见范围和图片顺序后发布");
       } catch (error) {
         await call(`/bridge/v1/requests/${request.id}/error`, { method: "POST", body: JSON.stringify({ error: String(error) }) });
@@ -250,16 +270,6 @@
         requestBox.replaceChildren();
       }
     })();
-    const resultURL = document.createElement("input");
-    resultURL.placeholder = "发布后的帖子永久链接";
-    resultURL.value = location.href;
-    requestBox.appendChild(resultURL);
-    addButton("我已人工发布，回传链接", () => void (async () => {
-      await call(`/bridge/v1/requests/${request.id}/result`, { method: "POST", body: JSON.stringify({ url: resultURL.value.trim() }) });
-      status("已回传人工确认的发布结果");
-      current = null;
-      requestBox.replaceChildren();
-    })().catch((error) => status(`回传失败：${String(error)}`)));
   }
   async function poll() {
     if (!config.token || !config.pairing) {
@@ -269,7 +279,7 @@
     try {
       const requests = await call("/bridge/v1/requests");
       const request = requests[0];
-      if (request && request.id !== (current == null ? void 0 : current.id)) {
+      if (!current && request) {
         current = request;
         requestBox.replaceChildren();
         if (request.kind === "capture") showCapture(request);

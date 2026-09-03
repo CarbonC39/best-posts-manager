@@ -51,6 +51,7 @@ type Variant struct {
 	SpoilerText    string    `json:"spoiler_text"`
 	LocalOnly      bool      `json:"local_only"`
 	Outdated       bool      `json:"outdated"`
+	Published      bool      `json:"published"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

@@ -2,10 +2,79 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestTopicMetadataExternalPostDeletionAndPublicationConfirmation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "before"})
+
+	updated, err := store.UpdateTopic(ctx, Topic{ID: topic.ID, Title: "  after  ", Status: "archived"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Title != "after" || updated.Status != "archived" || updated.ProfileID != profile.ID || !updated.UpdatedAt.After(topic.UpdatedAt) {
+		t.Fatalf("unexpected topic update: %+v", updated)
+	}
+	if _, err = store.UpdateTopic(ctx, Topic{ID: topic.ID, Title: "", Status: "active"}); err == nil {
+		t.Fatal("empty topic title must be rejected")
+	}
+	if _, err = store.UpdateTopic(ctx, Topic{ID: topic.ID, Title: "valid", Status: "deleted"}); err == nil {
+		t.Fatal("invalid topic status must be rejected")
+	}
+
+	external, err := store.CreateExternalPost(ctx, ExternalPost{TopicID: topic.ID, Platform: "x", URL: "https://example.test/post/1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.DeleteExternalPost(ctx, external.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.DeleteExternalPost(ctx, external.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second deletion should be not found, got %v", err)
+	}
+
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	publication, _ := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation", ErrorCategory: "unknown", ErrorMessage: "check remotely"})
+	if _, err = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "publishing"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a second unresolved publication should conflict, got %v", err)
+	}
+	confirmed, err := store.ConfirmPublication(ctx, publication.ID, "https://example.test/post/2", "remote-2", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Status != "published" || confirmed.RemoteURL == "" || confirmed.RemoteID != "remote-2" || confirmed.ErrorCategory != "" || confirmed.ErrorMessage != "" || confirmed.PublishedAt.IsZero() {
+		t.Fatalf("publication confirmation incomplete: %+v", confirmed)
+	}
+	if _, err = store.ConfirmPublication(ctx, publication.ID, "https://example.test/post/2", "", time.Now().UTC()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("repeated confirmation should conflict, got %v", err)
+	}
+	toCancel, err := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation", RemoteID: "uncertain", RemoteURL: "https://example.test/uncertain", RemoteCID: "cid", ErrorCategory: "unknown", ErrorMessage: "uncertain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.CancelPublication(ctx, toCancel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != "cancelled" || cancelled.ErrorCategory != "" || cancelled.ErrorMessage != "用户确认未发布" || cancelled.RemoteID != "" || cancelled.RemoteURL != "" || cancelled.RemoteCID != "" || !cancelled.PublishedAt.IsZero() {
+		t.Fatalf("publication cancellation incomplete: %+v", cancelled)
+	}
+	if _, err = store.CancelPublication(ctx, toCancel.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("repeated cancellation should conflict, got %v", err)
+	}
+}
 
 func TestStoreCoreAndVariantRelations(t *testing.T) {
 	ctx := context.Background()
@@ -40,8 +109,20 @@ func TestStoreCoreAndVariantRelations(t *testing.T) {
 	if v.Relation != "linked" || v.SourceRevision != "1" {
 		t.Fatalf("unexpected linked variant: %+v", v)
 	}
+	initialDraft, err := s.GetBaseDraft(ctx, topic.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedDraft, err := s.UpdateBaseDraft(ctx, initialDraft)
+	if err != nil || unchangedDraft.Revision != initialDraft.Revision {
+		t.Fatalf("unchanged draft should be a no-op: before=%+v after=%+v err=%v", initialDraft, unchangedDraft, err)
+	}
 	if _, err = s.UpdateBaseDraft(ctx, BaseDraft{TopicID: topic.ID, Text: "changed", Format: "plain"}); err != nil {
 		t.Fatal(err)
+	}
+	topicAfterDraft, err := s.GetTopic(ctx, topic.ID)
+	if err != nil || !topicAfterDraft.UpdatedAt.After(topic.UpdatedAt) {
+		t.Fatalf("draft edit did not touch topic: %+v %v", topicAfterDraft, err)
 	}
 	v, err = s.GetVariant(ctx, v.ID)
 	if err != nil {
@@ -142,6 +223,70 @@ func TestStoreRejectsCrossTopicReferences(t *testing.T) {
 	}
 	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: t2.ID, AccountID: a1.ID, Platform: "x", URL: "https://x.test/1"}); err == nil {
 		t.Fatal("cross-profile external account must be rejected")
+	}
+	if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: t1.ID, AccountID: a1.ID, Platform: "misskey", URL: "https://example.test/1"}); err == nil {
+		t.Fatal("external platform must match its account")
+	}
+	for _, invalidURL := range []string{"/relative", "file:///tmp/post", "https:///missing-host"} {
+		if _, err = s.CreateExternalPost(ctx, ExternalPost{TopicID: t1.ID, Platform: "x", URL: invalidURL}); err == nil {
+			t.Fatalf("invalid external URL accepted: %q", invalidURL)
+		}
+	}
+}
+
+func TestPublicationHistoryLocksVariantAndHistoricalMedia(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	variantPath := filepath.Join(store.MediaDir, "variant-history")
+	sharedPath := filepath.Join(store.MediaDir, "shared-history")
+	if err = os.WriteFile(variantPath, []byte("variant"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(sharedPath, []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	variantMedia, _ := store.AddMedia(ctx, Media{TopicID: topic.ID, VariantID: variant.ID, Filename: "variant.png", MIME: "image/png", Path: variantPath})
+	sharedMedia, _ := store.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "shared.png", MIME: "image/png", Path: sharedPath})
+	_, _ = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "failed"})
+
+	locked, err := store.GetVariant(ctx, variant.ID)
+	if err != nil || !locked.Published {
+		t.Fatalf("publication-derived field missing: %+v %v", locked, err)
+	}
+	locked.Text = "rewrite history"
+	if _, err = store.UpdateVariant(ctx, locked); !errors.Is(err, ErrConflict) {
+		t.Fatalf("published variant edit should conflict, got %v", err)
+	}
+	if _, err = store.ApplyVariantUpdate(ctx, locked.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("published variant draft apply should conflict, got %v", err)
+	}
+	if _, err = store.AddMedia(ctx, Media{TopicID: topic.ID, VariantID: locked.ID, Filename: "new.png", MIME: "image/png", Path: filepath.Join(store.MediaDir, "new")}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("published variant media attachment should conflict, got %v", err)
+	}
+	if err = store.DeleteMedia(ctx, variantMedia.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("variant publication media deletion should conflict, got %v", err)
+	}
+	if err = store.DeleteMedia(ctx, sharedMedia.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("shared publication media deletion should conflict, got %v", err)
+	}
+	lateSharedPath := filepath.Join(store.MediaDir, "late-shared")
+	if err = os.WriteFile(lateSharedPath, []byte("late"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lateShared, err := store.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "late.png", MIME: "image/png", Path: lateSharedPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.DeleteMedia(ctx, lateShared.ID); err != nil {
+		t.Fatalf("topic media added after the publication should remain deletable: %v", err)
 	}
 }
 
@@ -335,6 +480,30 @@ func TestDeleteVariantPreservesPublicationHistory(t *testing.T) {
 	}
 	if _, err = store.GetVariant(ctx, variant.ID); err != nil {
 		t.Fatalf("historical variant was removed: %v", err)
+	}
+}
+
+func TestCreateAccountReactivatesMatchingDisabledRemoteIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	original, err := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "misskey", Name: "old", RemoteID: "remote-1", BaseURL: "https://old.example", CredentialRef: "old-ref"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DeactivateAccount(ctx, original.ID); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "misskey", Name: "new", RemoteID: "remote-1", BaseURL: "https://new.example", CredentialRef: "new-ref"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ID != original.ID || restored.Disabled || restored.Name != "new" || restored.CredentialRef != "new-ref" {
+		t.Fatalf("account was not reactivated in place: %+v", restored)
 	}
 }
 

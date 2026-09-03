@@ -72,7 +72,7 @@ func TestBridgeHTTPPairFillResultAndCapture(t *testing.T) {
 		t.Fatalf("filled: %s %#v", res.Status, request)
 	}
 	var done bridge.Request
-	res = postBridge(t, ts.URL+"/bridge/v1/requests/"+request.ID+"/result", hello.Token, request.ID, "x", map[string]string{"url": "https://x.com/i/1", "remote_id": "1"}, &done)
+	res = postBridge(t, ts.URL+"/bridge/v1/requests/"+request.ID+"/result", hello.Token, request.ID, "x", map[string]string{"url": "https://x.com/user/status/1", "remote_id": "1"}, &done)
 	if res.StatusCode != 200 || done.Status != "published" {
 		t.Fatalf("result: %s %+v", res.Status, done)
 	}
