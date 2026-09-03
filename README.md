@@ -11,6 +11,8 @@ Best Post Manager 是一个单用户、本地运行的社交平台发帖工作�
 - 通过本地浏览器桥接连接 X、微博、小红书和 QQ 空间；浏览器脚本在用户已登录且当前可见的页面中工作。
 - 使用 Google Cloud Translation v3、DeepL v2、OpenAI Responses-compatible 或非官方 `google-gtx` provider 翻译内容；译文总是生成新的 detached Variant。`google-gtx` 是无凭据的非官方接口，单次最多 5000 Unicode 字符，可能随时失效。
 
+编辑页的平台版本使用搜索切换器，账号很多时只渲染当前选中的版本。基础稿工具栏可针对所选账号直接生成快照并进入发布流程：API 平台直接发布，浏览器桥接平台会明确显示为“填入”，仍需在平台页确认。当前版本编辑器旁提供按实例加载的 emoji（搜索、分批和点击插入）及翻译工具；翻译完成后自动切换到新的 detached 版本。
+
 ## 站外帖子关联
 
 URL 不是可靠的抓取入口，Best Post Manager 不会因用户粘贴 URL 而在后台请求或爬取站点。站外帖子有两种明确模式：

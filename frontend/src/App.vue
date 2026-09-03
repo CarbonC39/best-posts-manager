@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from './api'
 import { canAutoPublish } from './bridgeAdapters'
 import PublicationList from './PublicationList.vue'
@@ -74,6 +74,10 @@ const emojiLimit = ref(50)
 const emojiLoadedAccountID = ref('')
 const emojiLoading = ref(false)
 const emojiTargetAccountID = ref('')
+const variantSearch = ref('')
+const activeVariantID = ref('')
+const variantEditor = ref<HTMLTextAreaElement | null>(null)
+const draftPublishBusy = ref(false)
 const showArchivedTopics = ref(false)
 const topicTitleEdit = ref('')
 const externalImportAccountID = ref('')
@@ -100,9 +104,17 @@ const translationProviderDescription = computed(() => ({
 const profileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value && !account.disabled))
 const disabledProfileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value && account.disabled))
 const profileTopics = computed(() => topics.value.filter((topic) => topic.profile_id === selectedProfileID.value && (showArchivedTopics.value || topic.status === 'active')))
-const selectedCapability = computed(() => capabilities.value[selectedAccountID.value])
 const editableVariants = computed(() => variants.value.filter((variant) => !variant.published))
 const selectedAccount = computed(() => accounts.value.find((account) => account.id === selectedAccountID.value))
+const filteredVariants = computed(() => {
+  const query = variantSearch.value.trim().toLowerCase()
+  if (!query) return variants.value
+  return variants.value.filter((variant) => variantAccountLabel(variant).toLowerCase().includes(query) || variantFormatLabel(variant).toLowerCase().includes(query) || variantStatusLabel(variant).toLowerCase().includes(query) || variant.text.toLowerCase().includes(query))
+})
+const activeVariant = computed(() => {
+  const query = variantSearch.value.trim()
+  return query ? filteredVariants.value.find((variant) => variant.id === activeVariantID.value) || filteredVariants.value[0] : variants.value.find((variant) => variant.id === activeVariantID.value) || variants.value[0]
+})
 const externalImportAccount = computed(() => accounts.value.find((account) => account.id === externalImportAccountID.value))
 const canImportOfficially = computed(() => externalImportAccount.value?.platform === 'misskey' || externalImportAccount.value?.platform === 'bluesky')
 const externalPlatformAccounts = computed(() => profileAccounts.value.filter((account) => account.platform === externalPlatform.value || (externalPlatform.value === 'mastodon' && account.platform === 'mastodon-compatible')))
@@ -183,6 +195,11 @@ function variantAccountLabel(variant: Variant) {
   const account = variantAccount(variant)
   return account ? `${account.name} · ${account.platform}` : variant.account_id
 }
+function selectVariant(variant: Variant) {
+  activeVariantID.value = variant.id
+  emojiTargetAccountID.value = variant.account_id
+  translationSourceID.value = variant.id
+}
 function variantFormatLabel(variant: Variant) { return variant.format === 'mfm' ? 'MFM' : '纯文本' }
 function variantRelationLabel(variant: Variant) { return variant.relation === 'linked' ? '跟随基础稿' : '独立版本' }
 function variantStatusLabel(variant: Variant) { return variant.published ? '已有发布记录' : variant.status === 'ready' ? '可发布' : '草稿' }
@@ -215,6 +232,9 @@ watch(emojiTargetAccountID, (accountID) => {
     emojiFilter.value = ''
     emojiLimit.value = 50
   }
+})
+watch(filteredVariants, (items) => {
+  if (!items.some((variant) => variant.id === activeVariantID.value)) activeVariantID.value = items[0]?.id || variants.value[0]?.id || ''
 })
 
 function goSection(next: string) {
@@ -362,9 +382,11 @@ async function openTopic(topic: Topic) {
     text.value = draft.value.text
     topicTitleEdit.value = topic.title
     mediaVariantID.value = ''
+    variantSearch.value = ''
+    activeVariantID.value = variants.value[0]?.id || ''
     emojis.value = []
     emojiLoadedAccountID.value = ''
-    emojiTargetAccountID.value = variants.value.find((variant) => variantCapability(variant)?.custom_emoji)?.account_id || ''
+    emojiTargetAccountID.value = variants.value.find((variant) => variant.id === activeVariantID.value && variantCapability(variant)?.custom_emoji)?.account_id || variants.value.find((variant) => variantCapability(variant)?.custom_emoji)?.account_id || ''
     emojiFilter.value = ''
     emojiLimit.value = 50
     translationSourceID.value = variants.value[0]?.id || ''
@@ -395,9 +417,33 @@ async function newVariant() {
     await api('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: selectedAccountID.value }) })
     variants.value = listOrEmpty(await api<Variant[]>(`variants?topic_id=${selected.value.id}`))
     rememberVariants(variants.value)
+    variantSearch.value = ''
+    activeVariantID.value = variants.value[variants.value.length - 1]?.id || activeVariantID.value
+    emojiTargetAccountID.value = selectedAccountID.value
     translationSourceID.value ||= variants.value[0]?.id || ''
     message.value = '平台版本已生成'
   } catch (error) { showError(error) }
+}
+async function publishFromDraft() {
+  if (draftPublishBusy.value) return
+  if (!selected.value || !selectedAccountID.value) { message.value = '请先选择目标账号'; return }
+  if (draftDirty.value && !await persistDraft(false)) return
+  if (selectedAccount.value?.disabled) { message.value = '目标账号已停用，无法发布'; return }
+  draftPublishBusy.value = true
+  try {
+    const created = await api<Variant>('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: selectedAccountID.value }) })
+    variants.value.push(created)
+    variantBaselines.value[created.id] = variantSignature(created)
+    variantSearch.value = ''
+    activeVariantID.value = created.id
+    emojiTargetAccountID.value = created.account_id
+    if (isBridgePlatform(selectedAccount.value?.platform || '')) {
+      if (await fillBrowser(created)) message.value = '已从基础稿生成快照并发送填入请求；桥接平台仍需在平台页确认发布'
+      return
+    }
+    if (await publish(created)) message.value = '已从基础稿生成快照并发布成功'
+  } catch (error) { showError(error) }
+  finally { draftPublishBusy.value = false }
 }
 
 async function saveVariant(variant: Variant, announce = true) {
@@ -425,14 +471,15 @@ async function applyVariant(variant: Variant) {
 }
 
 async function publish(variant: Variant) {
-  if (variantBusy(variant)) return
+  if (variantBusy(variant)) return false
   setVariantBusy(variant, true)
-  if (variantDirty(variant) && !await saveVariant(variant, false)) { setVariantBusy(variant, false); return }
+  if (variantDirty(variant) && !await saveVariant(variant, false)) { setVariantBusy(variant, false); return false }
   try {
     await api('publications', { method: 'POST', body: JSON.stringify({ variant_id: variant.id }) })
     variant.published = true
     message.value = '发布完成（请查看历史）'
-  } catch (error) { message.value = `发布失败：${error instanceof Error ? error.message : String(error)}` }
+    return true
+  } catch (error) { message.value = `发布失败：${error instanceof Error ? error.message : String(error)}`; return false }
   finally { setVariantBusy(variant, false) }
 }
 
@@ -444,6 +491,9 @@ async function cloneVariant(variant: Variant) {
     const created = await api<Variant>('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: variant.account_id, source_variant_id: variant.id }) })
     variants.value.push(created)
     variantBaselines.value[created.id] = variantSignature(created)
+    variantSearch.value = ''
+    activeVariantID.value = created.id
+    emojiTargetAccountID.value = created.account_id
     translationSourceID.value = created.id
     message.value = '已复制为可编辑的新版本'
   } catch (error) { showError(error) }
@@ -525,6 +575,18 @@ async function loadEmoji(accountID = selectedAccountID.value) {
   finally { emojiLoading.value = false }
 }
 function showMoreEmoji() { emojiLimit.value += 50 }
+async function insertEmoji(emoji: Emoji, variant: Variant) {
+  if (variant.published) return
+  const value = `:${emoji.shortcode}:`
+  const area = variantEditor.value
+  const start = area?.selectionStart ?? variant.text.length
+  const end = area?.selectionEnd ?? start
+  variant.text = `${variant.text.slice(0, start)}${value}${variant.text.slice(end)}`
+  await nextTick()
+  area?.focus()
+  const cursor = start + value.length
+  area?.setSelectionRange(cursor, cursor)
+}
 async function createBridgePairing() {
   try {
     const pairing = await api<BridgePairing>('bridge/pairings', { method: 'POST', body: JSON.stringify({ platform: bridgePlatform.value }) })
@@ -564,23 +626,24 @@ async function revokeBridgePairing(pairing: BridgePairing) {
   try { await api(`bridge/pairings/${pairing.id}/revoke`, { method: 'POST' }); pairing.revoked = true; bridgeMessage.value = '配对已撤销' } catch (error) { showError(error) }
 }
 async function fillBrowser(variant: Variant, autoPublish = false) {
-  if (variantBusy(variant)) return
+  if (variantBusy(variant)) return false
   const account = accounts.value.find((item) => item.id === variant.account_id)
-  if (autoPublish && !window.confirm(`自动填入并点击 ${account?.name || account?.platform || '平台'} 当前页面的可见发布按钮？带图片时会为避免漏图而退回人工发布；页面结构变化时也可能失败，请随后核对结果。`)) return
+  if (autoPublish && !window.confirm(`自动填入并点击 ${account?.name || account?.platform || '平台'} 当前页面的可见发布按钮？带图片时会为避免漏图而退回人工发布；页面结构变化时也可能失败，请随后核对结果。`)) return false
   setVariantBusy(variant, true)
-  if (variantDirty(variant) && !await saveVariant(variant, false)) { setVariantBusy(variant, false); return }
+  if (variantDirty(variant) && !await saveVariant(variant, false)) { setVariantBusy(variant, false); return false }
   const pairing = connectedPairing(account?.platform)
   if (!pairing) {
     const authorized = bridgePairings.value.some((item) => item.code_used && !item.revoked && item.platform === account?.platform)
     bridgeMessage.value = authorized ? '已有授权，但没有检测到平台脚本近期心跳；请打开平台页并检查右下角 bridge 状态' : '请先完成匹配平台的配对；脚本会把当前页面安全回传给本地服务'
     setVariantBusy(variant, false)
-    return
+    return false
   }
   try {
     bridgeRequest.value = await api<BridgeRequest>('bridge/requests/fill', { method: 'POST', body: JSON.stringify({ pairing_id: pairing.id, variant_id: variant.id, page_url: pairing.page_url || '', auto_publish: autoPublish }) })
     variant.published = true
     bridgeMessage.value = autoPublish ? '已发送自动发布请求；脚本只会点击已知、可见且启用的发布按钮，请随后核对平台结果' : '已发送，等待脚本领取；填入后请人工检查并点击平台发布'
-  } catch (error) { showError(error) }
+    return true
+  } catch (error) { showError(error); return false }
   finally { setVariantBusy(variant, false) }
 }
 async function requestCapture() {
@@ -611,8 +674,12 @@ async function translateVariant() {
   if (source && variantDirty(source) && !await saveVariant(source, false)) { translationMessage.value = '源版本保存失败，未开始翻译'; return }
   try {
     const result = await api<{ variant: Variant; translation: unknown }>('translations', { method: 'POST', body: JSON.stringify({ source_variant_id: translationSourceID.value, target_account_id: translationTargetAccountID.value, source_language: translationSourceLanguage.value, target_language: translationTargetLanguage.value, config_id: translationConfigID.value }) })
-    variants.value.push(result.variant); variantBaselines.value[result.variant.id] = variantSignature(result.variant); translationMessage.value = '已生成新的 detached 翻译版本，原文未修改'
+    variants.value.push(result.variant); variantBaselines.value[result.variant.id] = variantSignature(result.variant); variantSearch.value = ''; activeVariantID.value = result.variant.id; emojiTargetAccountID.value = result.variant.account_id; translationMessage.value = '已生成新的 detached 翻译版本，原文未修改，已切换到新版本'
   } catch (error) { translationMessage.value = `翻译失败：${error instanceof Error ? error.message : String(error)}；原文与目标版本均未改动` }
+}
+async function translateActiveVariant() {
+  if (activeVariant.value) translationSourceID.value = activeVariant.value.id
+  await translateVariant()
 }
 let bridgeSyncing = false
 let bridgeRefreshTimer: number | undefined
@@ -674,15 +741,17 @@ onBeforeUnmount(() => {
       <section v-else-if="section==='editor' && selected" class="page-section editor-page">
         <button class="back" @click="goSection('topics')">← 返回内容</button><div class="eyebrow">正在编辑</div><div class="topic-title-editor"><input v-model="topicTitleEdit" aria-label="话题标题"><button :disabled="!topicTitleDirty" @click="renameSelectedTopic">重命名</button></div><p class="lede">基础稿是源头；平台版本只在你确认后更新。<span class="help-tip" tabindex="0" role="img" aria-label="平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本。</span></span></p>
         <textarea class="draft-editor" v-model="text" placeholder="从这里开始写…"></textarea>
-        <div class="actions editor-toolbar"><button class="primary-action" @click="saveDraft">{{draftDirty?'保存基础稿（有修改）':'保存基础稿'}}</button><select v-model="selectedAccountID" aria-label="目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} ({{account.platform}})</option></select><button @click="newVariant">从基础稿生成平台版本</button></div>
+        <div class="actions editor-toolbar"><button class="primary-action" @click="saveDraft">{{draftDirty?'保存基础稿（有修改）':'保存基础稿'}}</button><select v-model="selectedAccountID" aria-label="目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} ({{account.platform}})</option></select><button class="primary-action" @click="publishFromDraft" :disabled="!selectedAccountID || draftPublishBusy">{{draftPublishBusy?'处理中…':selectedAccount && isBridgePlatform(selectedAccount.platform) ? '从基础稿填入' : '从基础稿直接发布'}}</button><button @click="newVariant">仅生成平台版本</button></div>
         <div class="media-tools"><div class="section-label"><span>媒体</span><small>默认用于所有平台版本，图片只存储在本机</small></div><div class="actions media-controls"><select v-model="mediaVariantID" aria-label="图片适用范围"><option value="">所有平台版本</option><option v-for="variant in editableVariants" :key="variant.id" :value="variant.id">仅 {{variantAccountLabel(variant)}}</option></select><input v-model="altText" placeholder="图片替代文本"><label class="upload">添加图片<input type="file" accept="image/*" @change="uploadMedia"></label></div><ul v-if="media.length" class="media-list"><li v-for="item in media" :key="item.id"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span :title="item.filename">{{item.filename}}</span><small>{{mediaScopeLabel(item)}}</small><button class="text-button" @click="deleteMedia(item)">删除</button></li></ul></div>
-        <div class="platform-heading"><div><div class="section-label"><span>平台版本</span><small>{{variants.length}} 个版本</small><span class="help-tip" tabindex="0" role="img" aria-label="平台版本说明"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">编辑控件由账号能力决定；Misskey 保留 MFM，Bluesky 使用纯文本与 facets。{{selectedCapability?.visibility_note || ''}}</span></span></div></div></div>
-        <p v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</p><ul v-else class="variants"><li v-for="variant in variants" :key="variant.id" class="variant-card"><header class="variant-header"><div><strong>{{variantAccountLabel(variant)}}</strong><span>{{variantFormatLabel(variant)}} · {{variantRelationLabel(variant)}} · {{variantStatusLabel(variant)}}<b v-if="variantDirty(variant)" class="unsaved-mark"> · 未保存</b></span></div><em v-if="variant.outdated">基础稿有更新</em></header><textarea class="variant-editor" v-model="variant.text" rows="5" :disabled="variant.published"></textarea><div class="variant-options"><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><label><span>可见范围</span><select v-model="variant.visibility" :disabled="variant.published"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select></label><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="内容警告（可选）" :disabled="variant.published"><label v-if="variantCapability(variant)?.supports_local_only" class="checkbox-option"><input type="checkbox" v-model="variant.local_only" :disabled="variant.published">仅本地</label></div><div v-if="variantCapability(variant)?.format==='mfm'" class="mfm-preview"><small>原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><footer class="variant-actions"><button v-if="!variant.published" class="primary-action" :disabled="variantBusy(variant)" @click="saveVariant(variant)">{{variantBusy(variant)?'处理中…':'保存版本'}}</button><button v-if="variant.outdated&&!variant.published" :disabled="variantBusy(variant)" @click="applyVariant(variant)">应用基础稿更新</button><button v-if="!variant.published&&!variantAccount(variant)?.disabled && !isBridgePlatform(variantAccount(variant)?.platform||'')" :disabled="variantBusy(variant)" @click="publish(variant)">直接发布</button><template v-else-if="!variant.published&&!variantAccount(variant)?.disabled"><button :disabled="variantBusy(variant)" @click="fillBrowser(variant)">仅填入</button><button v-if="canAutoPublish(variantAccount(variant)?.platform||'')" :disabled="variantBusy(variant)" @click="fillBrowser(variant, true)">填入并自动发布</button></template><small v-else-if="variantAccount(variant)?.disabled" class="disabled-account">账号已停用，历史版本仅供查看</small><button v-if="variant.published" :disabled="variantBusy(variant)" @click="cloneVariant(variant)">复制为新版本</button><button v-if="!variant.published&&!variantAccount(variant)?.disabled" class="danger-text" :disabled="variantBusy(variant)" @click="deleteVariant(variant)">删除版本</button></footer></li></ul>
+        <div class="platform-heading"><div><div class="section-label"><span>平台版本</span><small>{{variants.length}} 个版本</small><span class="help-tip" tabindex="0" role="img" aria-label="平台版本说明"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">列表只负责定位账号；页面只渲染当前版本。编辑控件由账号能力决定；Misskey 保留 MFM，Bluesky 使用纯文本与 facets。</span></span></div><p class="platform-subtitle">选择一个版本进行编辑，其他版本不会占用页面空间。</p></div></div>
+        <div v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</div>
+        <div v-else class="variant-workspace">
+          <div class="variant-switcher"><label for="variant-search">查找平台版本</label><input id="variant-search" v-model="variantSearch" placeholder="搜索账号、平台、状态或正文…"><div class="variant-tabs" role="listbox" aria-label="平台版本列表"><button v-for="variant in filteredVariants" :key="variant.id" type="button" role="option" :aria-selected="activeVariant?.id === variant.id" :class="['variant-tab', { active: activeVariant?.id === variant.id }]" @click="selectVariant(variant)"><strong>{{variantAccountLabel(variant)}}</strong><small>{{variantFormatLabel(variant)}} · {{variantStatusLabel(variant)}}<b v-if="variantDirty(variant)"> · 未保存</b></small></button><p v-if="filteredVariants.length===0" class="empty-state">没有匹配的平台版本。</p></div></div>
+          <ul class="variants"><li v-if="activeVariant" class="variant-card"><header class="variant-header"><div><strong>{{variantAccountLabel(activeVariant)}}</strong><span>{{variantFormatLabel(activeVariant)}} · {{variantRelationLabel(activeVariant)}} · {{variantStatusLabel(activeVariant)}}<b v-if="variantDirty(activeVariant)" class="unsaved-mark"> · 未保存</b></span></div><em v-if="activeVariant.outdated">基础稿有更新</em></header><textarea ref="variantEditor" class="variant-editor" v-model="activeVariant.text" rows="5" :disabled="activeVariant.published"></textarea><div class="variant-inline-tools"><details v-if="variantCapability(activeVariant)?.custom_emoji" class="inline-tool" :open="emojiLoadedAccountID===activeVariant.account_id"><summary>插入实例 emoji</summary><div class="inline-tool-content"><div class="actions emoji-controls"><button type="button" class="secondary-action" @click="loadEmoji(activeVariant.account_id)" :disabled="emojiLoading || emojiLoadedAccountID===activeVariant.account_id">{{emojiLoading?'加载中…':emojiLoadedAccountID===activeVariant.account_id?'已加载':'加载实例 emoji'}}</button><input v-model="emojiFilter" placeholder="搜索 shortcode" :disabled="emojiLoadedAccountID!==activeVariant.account_id"></div><div v-if="emojiLoadedAccountID===activeVariant.account_id" class="emoji-browser"><small>共 {{emojis.length}} 个，匹配 {{matchingEmojis.length}} 个，当前显示 {{visibleEmojis.length}} 个</small><div class="emoji-list"><button v-for="emoji in visibleEmojis" :key="emoji.shortcode" type="button" class="emoji" :title="`插入 :${emoji.shortcode}:`" @click="insertEmoji(emoji, activeVariant)"><img loading="lazy" :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</button></div><button v-if="hasMoreEmojis" type="button" @click="showMoreEmoji">继续显示 50 个</button></div></div></details><details class="inline-tool translation-tool"><summary>翻译此版本</summary><div class="inline-tool-content"><small>当前版本作为源文，只生成新的 detached 版本，不覆盖原文。</small><div class="actions"><select v-model="translationTargetAccountID" aria-label="翻译目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID" aria-label="翻译配置"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button type="button" @click="translateActiveVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="notice">{{translationMessage}}</p></div></details></div><div class="variant-options"><small v-if="variantCapability(activeVariant)?.text_max_bytes">UTF-8 {{utf8Bytes(activeVariant.text)}} / {{variantCapability(activeVariant)?.text_max_bytes}} bytes</small><label><span>可见范围</span><select v-model="activeVariant.visibility" :disabled="activeVariant.published"><option v-for="visibility in variantCapability(activeVariant)?.visibilities || []" :key="visibility">{{visibility}}</option></select></label><input v-if="variantCapability(activeVariant)?.supports_cw" v-model="activeVariant.spoiler_text" placeholder="内容警告（可选）" :disabled="activeVariant.published"><label v-if="variantCapability(activeVariant)?.supports_local_only" class="checkbox-option"><input type="checkbox" v-model="activeVariant.local_only" :disabled="activeVariant.published">仅本地</label></div><div v-if="variantCapability(activeVariant)?.format==='mfm'" class="mfm-preview"><small>原始 MFM 预览（本地不渲染）</small><pre class="preview">{{activeVariant.text}}</pre></div><footer class="variant-actions"><button v-if="!activeVariant.published" class="primary-action" :disabled="variantBusy(activeVariant)" @click="saveVariant(activeVariant)">{{variantBusy(activeVariant)?'处理中…':'保存版本'}}</button><button v-if="activeVariant.outdated&&!activeVariant.published" :disabled="variantBusy(activeVariant)" @click="applyVariant(activeVariant)">应用基础稿更新</button><button v-if="!activeVariant.published&&!variantAccount(activeVariant)?.disabled && !isBridgePlatform(variantAccount(activeVariant)?.platform||'')" :disabled="variantBusy(activeVariant)" @click="publish(activeVariant)">直接发布</button><template v-else-if="!activeVariant.published&&!variantAccount(activeVariant)?.disabled"><button :disabled="variantBusy(activeVariant)" @click="fillBrowser(activeVariant)">仅填入</button><button v-if="canAutoPublish(variantAccount(activeVariant)?.platform||'')" :disabled="variantBusy(activeVariant)" @click="fillBrowser(activeVariant, true)">填入并自动发布</button></template><small v-else-if="variantAccount(activeVariant)?.disabled" class="disabled-account">账号已停用，历史版本仅供查看</small><button v-if="activeVariant.published" :disabled="variantBusy(activeVariant)" @click="cloneVariant(activeVariant)">复制为新版本</button><button v-if="!activeVariant.published&&!variantAccount(activeVariant)?.disabled" class="danger-text" :disabled="variantBusy(activeVariant)" @click="deleteVariant(activeVariant)">删除版本</button></footer></li></ul>
+        </div>
         <div class="bridge-status-panel" aria-label="浏览器桥接状态"><div class="section-label"><span>浏览器填入</span><small>发布入口保持可见</small><span class="help-tip" tabindex="0" role="img" aria-label="浏览器桥接帮助"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">脚本只处理你当前已登录且可见的页面；自动发布必须按次确认。</span></span></div><details class="inline-help"><summary>查看配对与发布说明</summary><p class="bridge-steps">每个平台首次安装脚本并输入一次 code；此后配对会跨刷新和重启恢复。所有平台支持安全填入；只有已验收发布控件的平台才显示单次自动发布，带图时仍退回人工发布。</p></details><p class="settings-note">先<a href="/userscript/bpm-bridge.user.js">安装或更新本地用户脚本</a>。脚本只处理当前可见页面；自动发布默认关闭。</p><div class="actions bridge-controls"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button class="primary-action" @click="createBridgePairing">生成/重置配对 code</button><button @click="refreshBridgeState">刷新连接状态</button><button @click="requestCapture">捕获当前可见帖子</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><div v-if="bridgePairings.length===0" class="bridge-state">未安装/未配对：安装脚本后生成配对。</div><ul v-else class="rows bridge-pairings"><li v-for="pairing in bridgePairings" :key="pairing.id"><div><strong>{{pairing.platform}}：{{pairingState(pairing)}}</strong><code v-if="pairing.code">{{pairing.code}}</code><details v-if="pairing.page_url || displayableTime(pairing.last_seen_at) || pairing.expires_at" class="pairing-details"><summary>连接详情</summary><small v-if="pairing.page_url">当前页：{{pairing.page_url}}</small><small v-if="displayableTime(pairing.last_seen_at)">最后心跳：{{new Date(pairing.last_seen_at).toLocaleString()}}</small><small v-if="pairing.expires_at">有效期至：{{new Date(pairing.expires_at).toLocaleString()}}</small></details></div><div class="row-actions"><button v-if="pairing.code" @click="copyPairingCode(pairing)">复制 code</button><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></div></li></ul><p v-if="bridgeRequest" class="bridge-request-status">最近请求：{{bridgeRequest.kind}} · {{bridgeRequestState(bridgeRequest)}}<span v-if="bridgeRequest.warning"> · 提示：{{bridgeRequest.warning}}</span><span v-if="bridgeRequest.error"> · 错误：{{bridgeRequest.error}}</span></p></div>
-        <details v-if="variants.some(variant=>variantCapability(variant)?.custom_emoji)" class="tool-section emoji-section"><summary>实例 emoji 辅助</summary><div class="tool-content"><div class="actions emoji-controls"><select v-model="emojiTargetAccountID" aria-label="emoji 所属账号"><option v-for="variant in variants.filter(item=>variantCapability(item)?.custom_emoji && variants.find(candidate=>candidate.account_id===item.account_id)?.id===item.id)" :key="variant.account_id" :value="variant.account_id">{{variantAccountLabel(variant)}}</option></select><button class="primary-action" @click="loadEmoji(emojiTargetAccountID)" :disabled="!emojiTargetAccountID || emojiLoading || emojiLoadedAccountID===emojiTargetAccountID">{{emojiLoading?'加载中…':emojiLoadedAccountID===emojiTargetAccountID?'已加载':'按需加载实例 emoji'}}</button></div><div v-if="emojiLoadedAccountID" class="emoji-browser"><input v-model="emojiFilter" placeholder="筛选 shortcode"><small>共 {{emojis.length}} 个，匹配 {{matchingEmojis.length}} 个，当前渲染 {{visibleEmojis.length}} 个</small><div class="emoji-list"><span v-for="emoji in visibleEmojis" :key="emoji.shortcode" class="emoji"><img loading="lazy" :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div><button v-if="hasMoreEmojis" @click="showMoreEmoji">继续显示 50 个</button></div></div></details>
         <details class="tool-section"><summary>发布与导入工具</summary><div class="tool-content"><h3>浏览器桥接 v1</h3><small>默认仅填入；只有你对某次请求选择“填入并自动发布”后，脚本才会点击明确匹配且可见、启用的发布按钮。页面结构不匹配时停止并提示人工处理。</small>
           <h3>站外关联</h3><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前本地脚本</a>（同源地址，不会触发 file:///）。安装到油猴后，在已登录的平台页面使用配对功能。</p><form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">不关联账号</option><option v-for="account in externalPlatformAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form><form @submit.prevent="importExternal"><select v-model="externalImportAccountID" aria-label="官方导入账号"><option value="">选择 Misskey / Bluesky 账号</option><option v-for="account in profileAccounts.filter(item=>item.platform==='misskey'||item.platform==='bluesky')" :key="account.id" :value="account.id">{{account.name}} · {{account.platform}}</option></select><input v-model="externalReference" placeholder="帖子 ID、URL 或 at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button></form><ul class="rows external-post-list"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small><button class="danger-text" @click="deleteExternalPost(post)">移除本地关联</button></li></ul></div></details>
-        <details class="tool-section"><summary>翻译工具</summary><div class="tool-content"><small>翻译只生成新的 detached Variant，不覆盖源版本；官方 provider 凭据从本地凭据或环境变量读取。</small><div class="actions"><select v-model="translationSourceID"><option v-for="variant in variants" :key="variant.id" :value="variant.id">{{variantAccountLabel(variant)}} · {{variant.text.slice(0,30)||'空内容'}}</option></select><select v-model="translationTargetAccountID"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button @click="translateVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="notice">{{translationMessage}}</p></div></details>
       </section>
       <section v-else-if="section==='editor'" class="page-section empty-editor">
         <div class="eyebrow">正在编辑</div><h1>先选择一个话题</h1><p class="lede">从内容列表打开话题后，基础稿和平台版本会显示在这里。</p><button class="primary-action" @click="goSection('topics')">返回内容</button>
