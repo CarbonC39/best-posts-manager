@@ -69,15 +69,19 @@ Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能�
 
 ### Fediverse
 
-- **Mastodon-compatible**：使用实例提供的标准 API，配置实例 URL、令牌、可见性、内容警告和媒体上传；首节点在账号设置或用户主动刷新时获取实例 custom emoji，按实例 URL 缓存其短代码与图片信息，在预览中渲染；发布仍发送平台原生短代码/规则，缓存不可用时回退为短代码。实例能力差异以运行时错误呈现，不做后台轮询刷新。
+- **Mastodon-compatible**：使用实例提供的标准 API，配置实例 URL、令牌、可见性、内容警告和媒体上传；custom emoji 仅在编辑页的折叠辅助区由用户按账号加载，按实例 URL 缓存其短代码与图片信息；发布仍发送平台原生短代码/规则，缓存不可用时回退为短代码。实例能力差异以运行时错误呈现，不做后台轮询刷新。连接诊断只读检查实例、身份端点和标准端点的 `OPTIONS` 兼容性信号，不实际发帖。
 - **Misskey**：使用 `{instance}/api` 官方 POST API：图片先走 `drive/files/create`，再用 `notes/create` 发布；支持 MFM（至少保存原始 MFM，不把 Markdown 假装成 MFM）、note 可见性、CW、localOnly 和自定义 emoji。emoji 按实例缓存；新版本 entity 缺少 URL 时按实例 `/emoji/{escaped-name}.webp` 派生。保留原生短代码/规则发送。MFM 预览需要明确标记其渲染器，避免误发 HTML。
 - Misskey 的 `notes/create` 没有可依赖的幂等键；本地 key 只用于记录，不能伪装成远端幂等。最终提交超时或 5xx 进入待确认，不能盲目重试。
 
 两者都只发布用户选定的 Variant，不抓取关注时间线，也不默认扫描账号最近帖子。URL 导入若没有官方可用的单帖查询，则保持 URL 标记模式。
 
+Mastodon/Misskey custom emoji 仅在对应账号的辅助区域按需加载，前端首屏最多渲染 50 个，支持 shortcode 筛选和继续加载，并使用 lazy image。
+
 ### Bluesky
 
 使用官方 AT Protocol XRPC：`com.atproto.server.createSession` 建立内存会话，`repo.uploadBlob` 上传图片，`repo.createRecord` 创建 `app.bsky.feed.post`；`resolveHandle`/`repo.getRecord` 使用 GET 查询。处理链接/提及的 UTF-8 byteStart/byteEnd facets 和图片 blob。远端记录 key/URI/CID 等标识，发布前完成 3000-byte record 与图片限制校验。`createRecord` 不提供本地可复用的幂等键，最终提交未知时保持待确认。首版只做明确的发帖/单帖导入能力，不做时间线同步。
+
+手动 Bluesky Account 创建后，WebUI 可调用只读诊断端点执行 `createSession`。诊断按 `validate`/`auth` 阶段和 `config`/`network`/`auth`/`protocol`/`retryable` 类别返回固定的脱敏消息与建议；不返回 app password 或 session JWT，也不把远端错误正文写入日志。诊断失败不能阻止保存账号，但必须在设置中可见并可重试，避免连接失败被误认为已可发布。
 
 ### 浏览器桥接平台能力
 
@@ -91,9 +95,11 @@ X、微博、小红书和 QQ 空间无法依赖稳定的公开发布 API 时，�
 
 节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发 90 天 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`filled`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次；明文 token 按平台放在油猴隔离存储，不放站点 localStorage，服务端在 SQLite 中只持久化哈希和有效期，因此页面刷新和本地程序重启都不要求重新输入 code。重新配对会轮换该平台 token，撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL 或日志，明文 token 不进 SQLite。
 
-本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持脚本管理器检查更新。HTTP 日志只记录 method、path、status 和耗时，不记录 query 或 body；连接日志只记录平台与阶段。WebUI 显示配对的当前 page URL、最后心跳、有效/撤销状态和最近请求状态；“已连接”要求最近 30 秒内有心跳，避免把已关闭的平台页显示为在线。已连接配对创建 fill/capture 时可省略 page URL，服务端使用内存中的已校验页面，而脚本每次请求仍提交并校验实际当前页面。
+本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持脚本管理器检查更新。HTTP 路由访问日志默认关闭，可由 `BPM_HTTP_LOG=1` 或 `serve --http-log` 显式开启；开启时只记录 method、path、status 和耗时，不记录 query 或 body。启动日志以及连接/Bluesky 诊断阶段日志始终保留且只含脱敏元数据。WebUI 显示配对的当前 page URL、最后心跳、有效/撤销状态和最近请求状态；“已连接”要求最近 30 秒内有心跳，避免把已关闭的平台页显示为在线。已连接配对创建 fill/capture 时可省略 page URL，服务端使用内存中的已校验页面，而脚本每次请求仍提交并校验实际当前页面。
 
 管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication：默认只填充；用户对当前 X 纯文本请求明确选择自动发布时，请求带 `auto_publish=true`，脚本才尝试点击已知、可见且启用的发布按钮，选择器不匹配就停止并提示。网页的媒体上传完成状态无法稳定跨平台判断，因此带媒体的自动发布请求会退回人工检查和发布。无论是否自动点击，用户都应核对平台结果；可在脚本或发布历史中填入帖子永久链接确认成功，也可明确确认未发布。超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本不调用隐藏 API。
+
+WebUI 将桥接的低频配对说明和连接详情折叠，当前请求状态、错误和主要配对动作保持可见；说明也可通过键盘聚焦帮助标记查看。
 
 本地端点默认只接受有效且未撤销的配对，并拒绝任意跨域调用。token 不写入网页内容、URL 或普通日志。脚本应显示连接状态和实际发送的数据摘要，让用户能撤销配对。桥接端点只服务当前本地用户，不是通用远程 API。
 

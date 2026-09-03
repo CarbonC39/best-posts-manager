@@ -166,6 +166,7 @@ func backupCommand(ctx context.Context, s *app.Store, args []string) {
 func serve(svc *service.Service, args []string) {
 	f := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := f.String("addr", "127.0.0.1:8787", "listen address")
+	httpLog := f.Bool("http-log", envHTTPLog(), "log HTTP routes (also enabled by BPM_HTTP_LOG=1)")
 	_ = f.Parse(args)
 	if !loopbackListenAddress(*addr) {
 		fatal(fmt.Errorf("serve address must use localhost or a loopback IP; remote access is not supported"))
@@ -175,11 +176,23 @@ func serve(svc *service.Service, args []string) {
 	if err != nil {
 		fatal(fmt.Errorf("embedded userscript: %w", err))
 	}
-	log.Printf("startup address=http://%s", *addr)
+	log.Printf("startup address=http://%s http_request_log=%s", *addr, enabledLabel(*httpLog))
 	staticHandler := http.FileServer(http.FS(static))
-	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: staticHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials)}); e != nil {
+	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: staticHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials), LogRequests: *httpLog}); e != nil {
 		fatal(e)
 	}
+}
+
+func envHTTPLog() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("BPM_HTTP_LOG")))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func enabledLabel(value bool) string {
+	if value {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func loopbackListenAddress(addr string) bool {

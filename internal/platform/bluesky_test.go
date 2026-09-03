@@ -146,3 +146,27 @@ func TestBlueskyResponseClassificationAndFacetOverlap(t *testing.T) {
 		t.Fatalf("overlapping link/mention facets: %#v", got)
 	}
 }
+
+func TestBlueskyConnectionDiagnosticClassifiesAndDoesNotExposeSecrets(t *testing.T) {
+	t.Setenv("BSKY_DIAGNOSTIC_PASSWORD", "secret-app-password")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/xrpc/com.atproto.server.createSession" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"did": "did:plc:test", "handle": "me.test", "accessJwt": "jwt"})
+	}))
+	defer server.Close()
+	diagnostic := NewBlueskyClient().CheckConnection(context.Background(), app.Account{ID: "local-account", BaseURL: server.URL, RemoteID: "me.test", TokenEnv: "BSKY_DIAGNOSTIC_PASSWORD"})
+	if !diagnostic.OK || diagnostic.Stage != "auth" || diagnostic.Handle != "me.test" || diagnostic.DID != "did:plc:test" {
+		t.Fatalf("unexpected successful diagnostic: %+v", diagnostic)
+	}
+	if diagnostic.Message == "secret-app-password" || strings.Contains(diagnostic.Message, "jwt") {
+		t.Fatalf("diagnostic contains secret: %+v", diagnostic)
+	}
+
+	bad := NewBlueskyClient().CheckConnection(context.Background(), app.Account{ID: "local-account", BaseURL: "https://pds.example", RemoteID: "me.test", TokenEnv: "MISSING_DIAGNOSTIC_PASSWORD"})
+	if bad.OK || bad.Category != "config" || bad.Hint == "" || strings.Contains(bad.Message, "MISSING_DIAGNOSTIC_PASSWORD") {
+		t.Fatalf("unexpected missing credential diagnostic: %+v", bad)
+	}
+}

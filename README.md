@@ -86,6 +86,10 @@ OAuth 连接要求通过回环地址打开 WebUI。Mastodon 会先发现实例�
 
 手动添加账号时仍只保存环境变量名：Misskey 的 `token_env` 指向 access token，`base_url` 是实例地址；Bluesky 的 `remote_id` 是 handle/identifier，`base_url` 是 PDS 地址，`token_env` 指向 app password。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：
 
+Bluesky 手动账号添加后会自动执行一次只读连接测试，也可以在设置中的账号卡片展开“Bluesky 连接诊断”并重新测试。测试只调用 `com.atproto.server.createSession`，不会发帖；界面会区分配置、网络、鉴权和协议阶段，并给出下一步建议。返回内容和 bpm 日志都不会包含 app password、JWT 或完整远端响应。
+
+Mastodon-compatible 手动账号或 OAuth 账号也可以在账号列表中点击“测试连接”。诊断依次检查实例、token、`verify_credentials` 身份端点，并使用 `OPTIONS` 探测标准发帖/媒体端点；探测结果只是实例兼容性信号，不是对 OAuth scope 的绝对证明，也不会发送帖子或媒体。发布历史会把失败区分为本地校验、身份认证、实例连通、媒体上传和正文提交阶段。
+
 ```sh
 export MISSKEY_TOKEN=...
 export BSKY_APP_PASSWORD=...
@@ -99,6 +103,8 @@ Misskey 保留 MFM 原文并使用官方 API；Bluesky 生成链接/提及 facet
 ### 节点 3 浏览器桥接
 
 用户脚本可在 Topic 编辑页的“浏览器填入”中安装/更新。每个平台首次生成并输入一次 code；本地服务随后签发 90 天 bearer。服务端只把 token 哈希和生命周期存入 SQLite，用户脚本按平台把明文 token 保存在油猴隔离存储，不使用站点 localStorage。页面刷新和程序重启后均可恢复连接，也可从 WebUI 撤销或在脚本中断开。
+
+运行时默认关闭 HTTP 路由访问日志，避免本地开发时被大量轮询刷屏；启动日志和 Bluesky/Mastodon 诊断阶段日志仍保留。需要临时排查路由时使用 `BPM_HTTP_LOG=1 bpm serve` 或 `bpm serve --http-log`，日志只记录 method、path、status 和耗时，不记录 query、body 或凭据。
 
 实际使用顺序：安装脚本，选择平台并生成 code（WebUI 会尝试自动复制），在已登录的平台页输入 code 并连接；以后直接在 Variant 选择“仅填入”，X 纯文本还可对当前一次请求选择“填入并自动发布”。重新安装脚本、清除油猴存储或主动重置配对时才需要新 code。页面 URL 由脚本回传，不需要手填；脚本的更新地址会自动跟随当前回环端口。
 

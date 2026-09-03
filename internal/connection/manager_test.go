@@ -20,7 +20,7 @@ func TestMastodonOAuthStoresOnlyReferenceAndRejectsReplay(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/oauth-authorization-server":
-			_ = json.NewEncoder(w).Encode(map[string]any{"scopes_supported": []string{"write:statuses", "write:media"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"scopes_supported": []string{"read:accounts", "write:statuses", "write:media"}})
 		case "/api/v1/apps":
 			_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "client", "client_secret": "private"})
 		case "/oauth/token":
@@ -51,7 +51,7 @@ func TestMastodonOAuthStoresOnlyReferenceAndRejectsReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, err := url.Parse(start.AuthorizationURL)
-	if err != nil || u.Query().Get("state") == "" || u.Query().Get("scope") != "write:statuses write:media" {
+	if err != nil || u.Query().Get("state") == "" || u.Query().Get("scope") != "read:accounts write:statuses write:media" {
 		t.Fatalf("bad auth URL: %s", start.AuthorizationURL)
 	}
 	a, err := m.CallbackMastodon(context.Background(), start.State, "one-time-code")

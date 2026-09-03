@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,8 +26,89 @@ type BlueskyClient struct {
 	Credentials credential.Store
 }
 
+// BlueskyDiagnostic is deliberately safe to show in the WebUI. It contains
+// no access/refresh token and its message is selected from a fixed category,
+// rather than exposing a remote response body or URL-bearing network error.
+type BlueskyDiagnostic struct {
+	OK        bool   `json:"ok"`
+	Stage     string `json:"stage"`
+	Category  string `json:"category,omitempty"`
+	Message   string `json:"message"`
+	Hint      string `json:"hint,omitempty"`
+	Handle    string `json:"handle,omitempty"`
+	DID       string `json:"did,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
 func NewBlueskyClient() *BlueskyClient {
 	return &BlueskyClient{HTTP: &http.Client{Timeout: 30 * time.Second}}
+}
+
+// CheckConnection validates the local configuration and performs a harmless
+// createSession call. It never publishes, reads a post, or logs credentials.
+func (c *BlueskyClient) CheckConnection(ctx context.Context, a app.Account) BlueskyDiagnostic {
+	started := time.Now()
+	d := BlueskyDiagnostic{Stage: "validate", Message: "正在检查 Bluesky 配置"}
+	finish := func() BlueskyDiagnostic {
+		d.ElapsedMS = time.Since(started).Milliseconds()
+		if d.OK {
+			log.Printf("bluesky diagnostic stage=%s result=ok account=%s", d.Stage, a.ID)
+		} else {
+			log.Printf("bluesky diagnostic stage=%s category=%s result=failed account=%s", d.Stage, d.Category, a.ID)
+		}
+		return d
+	}
+	base := strings.TrimSpace(a.BaseURL)
+	u, err := url.ParseRequestURI(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		d.Category, d.Message, d.Hint = "config", "PDS 地址无效", "填写完整的 http(s)://PDS 地址，不要包含账号密码或发布页面路径"
+		return finish()
+	}
+	identity := strings.TrimSpace(a.RemoteID)
+	if identity == "" || strings.ContainsAny(identity, " \t\r\n") {
+		d.Category, d.Message, d.Hint = "config", "Bluesky 身份为空", "填写 handle（例如 alice.bsky.social）或 DID"
+		return finish()
+	}
+	if a.CredentialRef == "" && strings.TrimSpace(a.TokenEnv) == "" {
+		d.Category, d.Message, d.Hint = "config", "未配置 app password 环境变量", "填写环境变量名，并在启动 bpm 前导出 app password；不要把密码写入配置或日志"
+		return finish()
+	}
+	d.Stage = "auth"
+	s, err := c.session(ctx, a)
+	if err != nil {
+		d.Category, d.Message, d.Hint = diagnosticError(err)
+		return finish()
+	}
+	if s.DID == "" || s.Handle == "" {
+		d.Category, d.Message, d.Hint = "protocol", "PDS 返回的身份信息不完整", "确认 PDS 地址指向 Bluesky 服务端，并重新测试"
+		return finish()
+	}
+	d.OK = true
+	d.Stage = "auth"
+	d.Message = "Bluesky 连接成功"
+	d.Handle, d.DID = s.Handle, s.DID
+	return finish()
+}
+
+func diagnosticError(err error) (category, message, hint string) {
+	pe, ok := err.(*Error)
+	if !ok {
+		return "unknown", "连接测试失败", "查看 bpm 进程日志后检查 PDS 地址和网络"
+	}
+	switch pe.Category {
+	case "config":
+		return "config", "本地凭据配置不可用", "检查环境变量名、环境变量值，或重新添加账号"
+	case "auth":
+		return "auth", "app password 无效或已过期", "在 Bluesky 设置中创建新的 app password；不要使用主密码"
+	case "network":
+		return "network", "无法连接到 PDS", "检查 PDS 地址、代理/VPN 和网络连通性"
+	case "retryable":
+		return "retryable", "PDS 暂时不可用或限流", "稍后重试；确认 PDS 地址没有被网关拦截"
+	case "protocol":
+		return "protocol", "PDS 返回格式不符合预期", "确认地址是 Bluesky PDS，而不是 Web 前端地址"
+	default:
+		return pe.Category, "Bluesky 连接测试失败", "检查 PDS 地址和 app password 后重试"
+	}
 }
 
 type bskySession struct {

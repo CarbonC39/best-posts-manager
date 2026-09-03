@@ -148,7 +148,7 @@ func (m *Manager) StartMastodon(ctx context.Context, req StartRequest, callbackB
 	if p == nil {
 		return StartResult{}, errors.New("connection state is unavailable")
 	}
-	scopes := "write" // old instances accept the coarse scope
+	scopes := "read write" // verify_credentials needs read access on coarse-scope instances
 	// OAuth metadata is advisory: granular scopes are requested only when advertised.
 	metadataRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/.well-known/oauth-authorization-server", nil)
 	if resp, e := m.HTTP.Do(metadataRequest); e == nil {
@@ -156,13 +156,21 @@ func (m *Manager) StartMastodon(ctx context.Context, req StartRequest, callbackB
 			Scopes []string `json:"scopes_supported"`
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&meta) == nil {
+			hasStatus, hasMedia, hasReadAccounts := false, false, false
 			for _, s := range meta.Scopes {
-				if s == "write:statuses" {
-					for _, x := range meta.Scopes {
-						if x == "write:media" {
-							scopes = "write:statuses write:media"
-						}
-					}
+				switch s {
+				case "write:statuses":
+					hasStatus = true
+				case "write:media":
+					hasMedia = true
+				case "read:accounts":
+					hasReadAccounts = true
+				}
+			}
+			if hasStatus && hasMedia {
+				scopes = "write:statuses write:media"
+				if hasReadAccounts {
+					scopes = "read:accounts " + scopes
 				}
 			}
 		}

@@ -141,13 +141,56 @@ func TestRequestLogDoesNotIncludeQueryValues(t *testing.T) {
 	previous := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)
-	server := &Server{}
+	server := &Server{LogRequests: true}
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/health?code=do-not-log&state=secret", nil)
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	logged := output.String()
 	if !strings.Contains(logged, "path=/api/health") || strings.Contains(logged, "do-not-log") || strings.Contains(logged, "state") {
 		t.Fatalf("unsafe request log: %s", logged)
+	}
+}
+
+func TestRequestLogIsDisabledByDefault(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	server := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/health", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if output.Len() != 0 {
+		t.Fatalf("request route was logged by default: %s", output.String())
+	}
+}
+
+func TestBlueskyDiagnosticEndpointRedactsFailure(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	profile, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
+	account, _ := st.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "bluesky", Name: "bsky", BaseURL: "http://127.0.0.1:1", RemoteID: "me.test", TokenEnv: "BPM_DIAGNOSTIC_SECRET"})
+	t.Setenv("BPM_DIAGNOSTIC_SECRET", "super-secret-app-password")
+	s := service.New(st)
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/accounts/"+account.ID+"/diagnostic", nil)
+	rec := httptest.NewRecorder()
+	(&Server{Svc: s}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diagnostic status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result["ok"] != false || result["category"] != "network" || result["message"] != "无法连接到 PDS" {
+		t.Fatalf("unexpected diagnostic: %#v", result)
+	}
+	if strings.Contains(rec.Body.String(), "super-secret") || strings.Contains(rec.Body.String(), "127.0.0.1:1") {
+		t.Fatalf("diagnostic leaked secret or endpoint: %s", rec.Body.String())
 	}
 }
 

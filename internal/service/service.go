@@ -73,6 +73,36 @@ type TranslationRequest struct {
 	ConfigID        string
 }
 
+// DiagnoseBluesky performs a non-mutating connection check for an existing
+// account. The platform client owns redaction and never returns credentials.
+func (s *Service) DiagnoseBluesky(ctx context.Context, accountID string) (platform.BlueskyDiagnostic, error) {
+	a, err := s.Store.GetAccount(ctx, accountID)
+	if err != nil {
+		return platform.BlueskyDiagnostic{}, err
+	}
+	if a.Platform != "bluesky" {
+		return platform.BlueskyDiagnostic{}, fmt.Errorf("account is not a Bluesky account")
+	}
+	if a.Disabled {
+		return platform.BlueskyDiagnostic{}, fmt.Errorf("account is deactivated; reconnect it before testing")
+	}
+	return s.Bluesky.CheckConnection(ctx, a), nil
+}
+
+func (s *Service) DiagnoseMastodon(ctx context.Context, accountID string) (platform.MastodonDiagnostic, error) {
+	a, err := s.Store.GetAccount(ctx, accountID)
+	if err != nil {
+		return platform.MastodonDiagnostic{}, err
+	}
+	if a.Platform != "mastodon" && a.Platform != "mastodon-compatible" {
+		return platform.MastodonDiagnostic{}, fmt.Errorf("account is not a Mastodon-compatible account")
+	}
+	if a.Disabled {
+		return platform.MastodonDiagnostic{}, fmt.Errorf("account is deactivated; reconnect it before testing")
+	}
+	return s.Mastodon.CheckConnection(ctx, a), nil
+}
+
 // Translate never edits the source. The provider call happens before the
 // transaction that creates the detached target Variant and its audit record.
 func (s *Service) Translate(ctx context.Context, req TranslationRequest) (app.Variant, app.Translation, error) {
@@ -175,7 +205,7 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 		p.Status = "failed"
 		if pe, ok := e.(*platform.Error); ok {
 			p.ErrorCategory = pe.Category
-			p.ErrorMessage = pe.Err.Error()
+			p.ErrorMessage = publicationErrorMessage(pe)
 			if pe.OutcomeUnknown {
 				p.Status = "needs_confirmation"
 			} else if pe.Retryable || (pe.Category == "network" && pe.Stage == "media") {
@@ -298,7 +328,7 @@ func (s *Service) Retry(ctx context.Context, publicationID string) (app.Publicat
 		p.Status = "failed"
 		if pe, ok := err.(*platform.Error); ok {
 			p.ErrorCategory = pe.Category
-			p.ErrorMessage = pe.Err.Error()
+			p.ErrorMessage = publicationErrorMessage(pe)
 			if pe.OutcomeUnknown {
 				p.Status = "needs_confirmation"
 			} else if pe.Retryable || (pe.Category == "network" && pe.Stage == "media") {
@@ -321,3 +351,17 @@ func (s *Service) Retry(ctx context.Context, publicationID string) (app.Publicat
 type errUnsupported struct{ p string }
 
 func (e errUnsupported) Error() string { return "unsupported platform: " + e.p }
+
+func publicationErrorMessage(pe *platform.Error) string {
+	stage := map[string]string{
+		"validate": "本地校验",
+		"auth":     "身份认证",
+		"instance": "实例连通",
+		"media":    "媒体上传",
+		"submit":   "正文提交",
+	}[pe.Stage]
+	if stage == "" {
+		stage = "平台请求"
+	}
+	return fmt.Sprintf("%s阶段失败：%s", stage, pe.Err.Error())
+}

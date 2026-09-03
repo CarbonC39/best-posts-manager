@@ -29,6 +29,9 @@ type Server struct {
 	UserScript  []byte
 	Bridge      *bridge.Manager
 	Connections *connection.Manager
+	// LogRequests is opt-in because this is a local app and route logs add
+	// noise during normal use. Diagnostic and startup logs are independent.
+	LogRequests bool
 	bridgeMu    sync.Mutex
 }
 
@@ -53,10 +56,16 @@ func (w *responseLogger) Write(body []byte) (int, error) {
 func (w *responseLogger) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logged := &responseLogger{ResponseWriter: w}
-	w = logged
+	var logged *responseLogger
+	if s.LogRequests {
+		logged = &responseLogger{ResponseWriter: w}
+		w = logged
+	}
 	started := time.Now()
 	defer func() {
+		if !s.LogRequests {
+			return
+		}
 		status := logged.status
 		if status == 0 {
 			status = http.StatusOK
@@ -488,6 +497,37 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeJSON(w, 200, v)
 		}
+		return
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/diagnostic") && r.Method == http.MethodPost:
+		aid := strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/diagnostic")
+		account, e := s.Svc.Store.GetAccount(ctx, aid)
+		if e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
+			return
+		}
+		if account.Platform == "bluesky" {
+			diagnostic, diagnosticErr := s.Svc.DiagnoseBluesky(ctx, aid)
+			if diagnosticErr != nil {
+				fail(w, http.StatusBadRequest, diagnosticErr)
+			} else {
+				writeJSON(w, http.StatusOK, diagnostic)
+			}
+			return
+		}
+		if account.Platform == "mastodon" || account.Platform == "mastodon-compatible" {
+			diagnostic, diagnosticErr := s.Svc.DiagnoseMastodon(ctx, aid)
+			if diagnosticErr != nil {
+				fail(w, http.StatusBadRequest, diagnosticErr)
+			} else {
+				writeJSON(w, http.StatusOK, diagnostic)
+			}
+			return
+		}
+		fail(w, http.StatusBadRequest, fmt.Errorf("connection diagnostics are not supported for %s", account.Platform))
 		return
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/capability") && r.Method == http.MethodGet:
 		aid := strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/capability")

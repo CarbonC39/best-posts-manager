@@ -27,7 +27,7 @@ func (r *recordingCredentials) Delete(ref string) error {
 func TestPublishApplicationFlow(t *testing.T) {
 	t.Setenv("BPM_TEST_TOKEN", "secret")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/statuses" {
+		if r.URL.Path == "/api/v1/statuses" {
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "1", "url": "http://fake/1"})
 			return
 		}

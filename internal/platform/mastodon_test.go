@@ -27,7 +27,7 @@ func TestMastodonEmojiCacheAndPublishContract(t *testing.T) {
 			mediaCalls++
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "media-1"})
-		case "/api/statuses":
+		case "/api/v1/statuses":
 			statusCalls++
 			idempotency = r.Header.Get("Idempotency-Key")
 			_ = json.NewDecoder(r.Body).Decode(&statusBody)
@@ -75,12 +75,50 @@ func TestMastodonValidationClassifiesInput(t *testing.T) {
 	}
 }
 
+func TestMastodonConnectionDiagnosticUsesOnlyReadAndOptions(t *testing.T) {
+	t.Setenv("BPM_DIAGNOSTIC_TOKEN", "secret-token")
+	var posted bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/instance":
+			if r.Method != http.MethodGet {
+				t.Errorf("instance method=%s", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"domain": "example.test"})
+		case "/api/v1/accounts/verify_credentials":
+			if r.Method != http.MethodGet {
+				t.Errorf("identity method=%s", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "42", "username": "alice"})
+		case "/api/v1/statuses", "/api/v2/media":
+			if r.Method == http.MethodPost {
+				posted = true
+			}
+			if r.Method != http.MethodOptions {
+				t.Errorf("permission probe method=%s", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	diagnostic := NewClient().CheckConnection(context.Background(), app.Account{ID: "local", BaseURL: ts.URL, TokenEnv: "BPM_DIAGNOSTIC_TOKEN"})
+	if !diagnostic.OK || diagnostic.Username != "alice" || diagnostic.AccountID != "42" || diagnostic.StatusWrite.Status != "available" || diagnostic.MediaWrite.Status != "available" {
+		t.Fatalf("unexpected diagnostic: %+v", diagnostic)
+	}
+	if posted || strings.Contains(diagnostic.Message, "secret-token") {
+		t.Fatalf("diagnostic performed a write or leaked token: %+v", diagnostic)
+	}
+}
+
 func TestRequestErrorCategoriesAndTokenSafety(t *testing.T) {
 	t.Setenv("BPM_TEST_TOKEN", "secret")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/auth":
 			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"token expired\nplease reconnect"}`))
 		case "/rate":
 			w.WriteHeader(http.StatusTooManyRequests)
 		case "/bad":
@@ -97,6 +135,9 @@ func TestRequestErrorCategoriesAndTokenSafety(t *testing.T) {
 		e, ok := err.(*Error)
 		if !ok || e.Category != tc.category {
 			t.Fatalf("%s: %#v", tc.path, err)
+		}
+		if tc.path == "/auth" && !strings.Contains(e.Err.Error(), "token expired please reconnect") {
+			t.Fatalf("bounded remote error detail was not preserved: %v", e)
 		}
 	}
 	called := false

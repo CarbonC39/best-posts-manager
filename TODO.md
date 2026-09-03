@@ -83,8 +83,13 @@
 
 - [x] 本地权限受限 credential Store、v6 migration，以及 Account/TranslationConfig 的引用优先、环境变量 fallback。
 - [x] 设置页动态平台/provider 说明；Mastodon OAuth granular-scope discovery/旧实例 fallback；Misskey MiAuth；过期、重放和失败清理测试。
+- [x] Bluesky 手动账号添加后执行只读连接诊断；设置页可按账号重试，并按配置/网络/鉴权/协议阶段显示脱敏错误和建议。
+- [x] Mastodon-compatible 手动/OAuth 账号提供只读实例、身份和发帖/媒体端点诊断；OAuth 在支持 granular scope 时请求 `read:accounts`，权限探测明确不冒充 scope 证明。
 - [x] 非官方 `google-gtx` provider（本地 5000 Unicode 字符校验、分段响应、fake-server 测试）；真实 provider/真实账号仍只做手工验收。
 - [x] 将 OAuth/MiAuth 合并到平台账号表单，补齐手动添加反馈与账号列表；从同源 WebUI 安装/更新用户脚本，并增加不记录 query/body/secret 的请求与连接阶段日志。
+- [x] HTTP 路由访问日志默认关闭，可用 `BPM_HTTP_LOG=1` 或 `bpm serve --http-log` 临时开启；启动和脱敏诊断日志保持可见。
+- [x] Mastodon 发布使用标准 `/api/v1/statuses` 路径；历史错误显示实例/认证/媒体/正文提交阶段。
+- [x] custom emoji 按账号按需加载，首屏最多 50 个，支持筛选、继续加载和 lazy image。
 
 验收标准：翻译可追溯且原文不变；失去网络或程序重启后能恢复编辑和发布历史；超时不会盲目重复发布；备份可在另一空目录恢复正文、媒体和记录但不泄露 token；常见错误能告诉用户下一步操作。
 
@@ -111,7 +116,7 @@
 - [ ] 更丰富的 Markdown/MFM/平台 emoji 编辑辅助和无损转换提示。
 - [ ] 媒体裁剪、压缩、替代文本检查和可选本地全文搜索。
 - [ ] 可靠的发布计划/定时提醒（仍由用户确认，不做无人值守浏览器发布）。
-- [ ] 可选的导出格式、冲突诊断和更完整的诊断日志。
+- [ ] 可选的导出格式、冲突诊断和更完整的诊断日志（当前提供 Bluesky/Mastodon 连接测试和脱敏阶段日志）。
 
 ## 明确不做
 

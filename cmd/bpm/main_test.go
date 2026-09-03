@@ -30,6 +30,21 @@ func TestServeAddressMustBeLoopback(t *testing.T) {
 	}
 }
 
+func TestHTTPLogOptInFromEnvironment(t *testing.T) {
+	for _, value := range []string{"1", "true", "yes", "on", "TRUE"} {
+		t.Setenv("BPM_HTTP_LOG", value)
+		if !envHTTPLog() {
+			t.Fatalf("BPM_HTTP_LOG=%q was not enabled", value)
+		}
+	}
+	for _, value := range []string{"", "0", "false", "off", "random"} {
+		t.Setenv("BPM_HTTP_LOG", value)
+		if envHTTPLog() {
+			t.Fatalf("BPM_HTTP_LOG=%q was unexpectedly enabled", value)
+		}
+	}
+}
+
 func TestCLIApplicationFlow(t *testing.T) {
 	dir := t.TempDir()
 	goCache := filepath.Join(t.TempDir(), "cache")

@@ -16,6 +16,9 @@ type BridgePairing = { id: string; platform: string; code?: string; expires_at: 
 type BridgeRequest = { id: string; kind: string; status: string; warning?: string; error?: string; external_post_id?: string }
 type Capability = { platform: string; format: string; text_max_bytes: number; max_media: number; max_media_bytes: number; visibilities: string[]; supports_cw: boolean; supports_local_only: boolean; custom_emoji: boolean; visibility_note?: string }
 type TranslationConfig = { id: string; provider: string; base_url: string; project_id: string; location: string; token_env: string; key_env: string; model: string }
+type BlueskyDiagnostic = { ok: boolean; stage: string; category?: string; message: string; hint?: string; handle?: string; did?: string; elapsed_ms: number }
+type PermissionSignal = { endpoint: string; status: string; message: string }
+type MastodonDiagnostic = { ok: boolean; stage: string; category?: string; message: string; hint?: string; username?: string; account_id?: string; status_write: PermissionSignal; media_write: PermissionSignal; elapsed_ms: number }
 
 function listOrEmpty<T>(value: T[] | null | undefined): T[] { return Array.isArray(value) ? value : [] }
 
@@ -63,6 +66,14 @@ const translationBaseURL = ref('')
 const translationProjectOrModel = ref('')
 const translationMessage = ref('')
 const connectionMessage = ref('')
+const blueskyDiagnostic = ref<Record<string, BlueskyDiagnostic>>({})
+const mastodonDiagnostic = ref<Record<string, MastodonDiagnostic>>({})
+const diagnosticBusy = ref<Set<string>>(new Set())
+const emojiFilter = ref('')
+const emojiLimit = ref(50)
+const emojiLoadedAccountID = ref('')
+const emojiLoading = ref(false)
+const emojiTargetAccountID = ref('')
 const showArchivedTopics = ref(false)
 const topicTitleEdit = ref('')
 const externalImportAccountID = ref('')
@@ -95,6 +106,12 @@ const selectedAccount = computed(() => accounts.value.find((account) => account.
 const externalImportAccount = computed(() => accounts.value.find((account) => account.id === externalImportAccountID.value))
 const canImportOfficially = computed(() => externalImportAccount.value?.platform === 'misskey' || externalImportAccount.value?.platform === 'bluesky')
 const externalPlatformAccounts = computed(() => profileAccounts.value.filter((account) => account.platform === externalPlatform.value || (externalPlatform.value === 'mastodon' && account.platform === 'mastodon-compatible')))
+const matchingEmojis = computed(() => {
+  const query = emojiFilter.value.trim().toLowerCase()
+  return query ? emojis.value.filter((emoji) => emoji.shortcode.toLowerCase().includes(query)) : emojis.value
+})
+const visibleEmojis = computed(() => matchingEmojis.value.slice(0, emojiLimit.value))
+const hasMoreEmojis = computed(() => visibleEmojis.value.length < matchingEmojis.value.length)
 
 function variantSignature(variant: Variant) {
   return JSON.stringify([variant.text, variant.visibility, variant.spoiler_text, variant.local_only])
@@ -109,6 +126,14 @@ const draftDirty = computed(() => Boolean(draft.value && text.value !== draft.va
 const topicTitleDirty = computed(() => Boolean(selected.value && topicTitleEdit.value !== selected.value.title))
 const hasUnsavedChanges = computed(() => topicTitleDirty.value || draftDirty.value || variants.value.some(variantDirty))
 function variantBusy(variant: Variant) { return busyVariantIDs.value.has(variant.id) }
+function diagnosticIsBusy(account: Account) { return diagnosticBusy.value.has(account.id) }
+function setDiagnosticBusy(account: Account, busy: boolean) {
+  const next = new Set(diagnosticBusy.value)
+  if (busy) next.add(account.id); else next.delete(account.id)
+  diagnosticBusy.value = next
+}
+function isMastodon(account?: Account) { return account?.platform === 'mastodon' || account?.platform === 'mastodon-compatible' }
+function emojiOwner(variant: Variant) { return emojiLoadedAccountID.value === variant.account_id && variants.value.find((item) => item.account_id === variant.account_id)?.id === variant.id }
 function setVariantBusy(variant: Variant, busy: boolean) {
   const next = new Set(busyVariantIDs.value)
   if (busy) next.add(variant.id); else next.delete(variant.id)
@@ -183,6 +208,14 @@ watch(selectedAccountID, (accountID) => {
 watch(externalPlatform, () => {
   if (!externalPlatformAccounts.value.some((account) => account.id === externalAccountID.value)) externalAccountID.value = ''
 })
+watch(emojiTargetAccountID, (accountID) => {
+  if (accountID !== emojiLoadedAccountID.value) {
+    emojis.value = []
+    emojiLoadedAccountID.value = ''
+    emojiFilter.value = ''
+    emojiLimit.value = 50
+  }
+})
 
 function goSection(next: string) {
   if (section.value === 'editor' && next !== 'editor' && hasUnsavedChanges.value && !window.confirm('还有未保存的稿件修改，确定离开并丢弃这些修改吗？')) return
@@ -237,7 +270,35 @@ async function addAccount() {
     await load()
     if (!accounts.value.some((account) => account.id === created.id)) accounts.value.push(created)
     message.value = '账号已添加'
+    if (created.platform === 'bluesky') await diagnoseBluesky(created)
+    if (isMastodon(created)) await diagnoseMastodon(created)
   } catch (error) { showError(error) }
+}
+async function diagnoseBluesky(account: Account) {
+  if (account.platform !== 'bluesky') return
+  setDiagnosticBusy(account, true)
+  try {
+    const result = await api<BlueskyDiagnostic>(`accounts/${account.id}/diagnostic`, { method: 'POST' })
+    blueskyDiagnostic.value[account.id] = result
+    connectionMessage.value = result.ok
+      ? `Bluesky 连接成功：@${result.handle || account.remote_id}（${result.elapsed_ms} ms）`
+      : `Bluesky 连接失败［${result.stage}/${result.category || 'unknown'}］：${result.message}${result.hint ? `。建议：${result.hint}` : ''}`
+  } catch (error) {
+    connectionMessage.value = `Bluesky 诊断请求失败：${error instanceof Error ? error.message : String(error)}。请查看 bpm 进程日志。`
+  } finally { setDiagnosticBusy(account, false) }
+}
+async function diagnoseMastodon(account: Account) {
+  if (!isMastodon(account)) return
+  setDiagnosticBusy(account, true)
+  try {
+    const result = await api<MastodonDiagnostic>(`accounts/${account.id}/diagnostic`, { method: 'POST' })
+    mastodonDiagnostic.value[account.id] = result
+    connectionMessage.value = result.ok
+      ? `${result.category ? 'Mastodon 检测完成（有警告）' : 'Mastodon 连接成功'}：@${result.username || account.name}（${result.elapsed_ms} ms）${result.hint ? `。${result.hint}` : ''}`
+      : `Mastodon 连接失败［${result.stage}/${result.category || 'unknown'}］：${result.message}${result.hint ? `。建议：${result.hint}` : ''}`
+  } catch (error) {
+    connectionMessage.value = `Mastodon 诊断请求失败：${error instanceof Error ? error.message : String(error)}。请查看 bpm 进程日志。`
+  } finally { setDiagnosticBusy(account, false) }
 }
 async function removeAccount(account: Account) {
   if (!window.confirm(`停用账号“${account.name}”？历史版本和发布记录会保留。`)) return
@@ -301,6 +362,11 @@ async function openTopic(topic: Topic) {
     text.value = draft.value.text
     topicTitleEdit.value = topic.title
     mediaVariantID.value = ''
+    emojis.value = []
+    emojiLoadedAccountID.value = ''
+    emojiTargetAccountID.value = variants.value.find((variant) => variantCapability(variant)?.custom_emoji)?.account_id || ''
+    emojiFilter.value = ''
+    emojiLimit.value = 50
     translationSourceID.value = variants.value[0]?.id || ''
     translationTargetAccountID.value = profileAccounts.value[0]?.id || ''
     externalImportAccountID.value = profileAccounts.value.find((account) => account.platform === 'misskey' || account.platform === 'bluesky')?.id || ''
@@ -441,13 +507,24 @@ async function deleteVariant(variant: Variant) {
   } catch (error) { showError(error) }
 }
 
-async function loadEmoji() {
-  if (!selectedAccountID.value) return
+async function loadEmoji(accountID = selectedAccountID.value) {
+  if (!accountID || emojiLoading.value) return
+  if (emojiLoadedAccountID.value === accountID && emojis.value.length) return
+  emojiLoading.value = true
+  emojis.value = []
+  emojiLoadedAccountID.value = ''
+  emojiFilter.value = ''
+  emojiLimit.value = 50
   try {
-    emojis.value = listOrEmpty(await api<Emoji[]>(`accounts/${selectedAccountID.value}/emojis`))
-    message.value = `已加载 ${emojis.value.length} 个实例 emoji`
+    emojis.value = listOrEmpty(await api<Emoji[]>(`accounts/${accountID}/emojis`))
+    emojiLoadedAccountID.value = accountID
+    emojiFilter.value = ''
+    emojiLimit.value = 50
+    message.value = `已加载 ${emojis.value.length} 个实例 emoji（首屏显示 50 个）`
   } catch (error) { message.value = `emoji 加载失败：${error instanceof Error ? error.message : String(error)}` }
+  finally { emojiLoading.value = false }
 }
+function showMoreEmoji() { emojiLimit.value += 50 }
 async function createBridgePairing() {
   try {
     const pairing = await api<BridgePairing>('bridge/pairings', { method: 'POST', body: JSON.stringify({ platform: bridgePlatform.value }) })
@@ -595,13 +672,14 @@ onBeforeUnmount(() => {
         <p v-if="profiles.length===0" class="empty-state">还没有 Profile。前往设置创建后，就可以开始第一个话题。</p><p v-else-if="profileTopics.length===0" class="empty-state">这个 Profile 还没有话题，从上方写下第一个标题吧。</p><ul v-else class="rows topic-list"><li v-for="topic in profileTopics" :key="topic.id"><button class="link" @click="openTopic(topic)">{{topic.title}}</button><span>{{topic.status==='archived'?'已归档':'进行中'}}</span><button class="text-button" @click="setTopicStatus(topic, topic.status==='archived'?'active':'archived')">{{topic.status==='archived'?'恢复':'归档'}}</button></li></ul>
       </section>
       <section v-else-if="section==='editor' && selected" class="page-section editor-page">
-        <button class="back" @click="goSection('topics')">← 返回内容</button><div class="eyebrow">正在编辑</div><div class="topic-title-editor"><input v-model="topicTitleEdit" aria-label="话题标题"><button :disabled="!topicTitleDirty" @click="renameSelectedTopic">重命名</button></div><p class="lede">基础稿是源头；平台版本只在你确认后更新。</p>
+        <button class="back" @click="goSection('topics')">← 返回内容</button><div class="eyebrow">正在编辑</div><div class="topic-title-editor"><input v-model="topicTitleEdit" aria-label="话题标题"><button :disabled="!topicTitleDirty" @click="renameSelectedTopic">重命名</button></div><p class="lede">基础稿是源头；平台版本只在你确认后更新。<span class="help-tip" tabindex="0" role="img" aria-label="平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本。</span></span></p>
         <textarea class="draft-editor" v-model="text" placeholder="从这里开始写…"></textarea>
         <div class="actions editor-toolbar"><button class="primary-action" @click="saveDraft">{{draftDirty?'保存基础稿（有修改）':'保存基础稿'}}</button><select v-model="selectedAccountID" aria-label="目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} ({{account.platform}})</option></select><button @click="newVariant">从基础稿生成平台版本</button></div>
         <div class="media-tools"><div class="section-label"><span>媒体</span><small>默认用于所有平台版本，图片只存储在本机</small></div><div class="actions media-controls"><select v-model="mediaVariantID" aria-label="图片适用范围"><option value="">所有平台版本</option><option v-for="variant in editableVariants" :key="variant.id" :value="variant.id">仅 {{variantAccountLabel(variant)}}</option></select><input v-model="altText" placeholder="图片替代文本"><label class="upload">添加图片<input type="file" accept="image/*" @change="uploadMedia"></label></div><ul v-if="media.length" class="media-list"><li v-for="item in media" :key="item.id"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span :title="item.filename">{{item.filename}}</span><small>{{mediaScopeLabel(item)}}</small><button class="text-button" @click="deleteMedia(item)">删除</button></li></ul></div>
-        <div class="platform-heading"><div><div class="section-label"><span>平台版本</span><small>{{variants.length}} 个版本</small></div><small>编辑控件由账号能力决定；Misskey 保留 MFM，Bluesky 使用纯文本与 facets。</small><small v-if="selectedCapability?.visibility_note">{{selectedCapability.visibility_note}}</small></div><button v-if="selectedCapability?.custom_emoji" class="text-button" @click="loadEmoji">加载实例 emoji</button></div><div class="emoji-list"><span v-for="emoji in emojis" :key="emoji.shortcode" class="emoji"><img :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div>
+        <div class="platform-heading"><div><div class="section-label"><span>平台版本</span><small>{{variants.length}} 个版本</small><span class="help-tip" tabindex="0" role="img" aria-label="平台版本说明"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">编辑控件由账号能力决定；Misskey 保留 MFM，Bluesky 使用纯文本与 facets。{{selectedCapability?.visibility_note || ''}}</span></span></div></div></div>
         <p v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</p><ul v-else class="variants"><li v-for="variant in variants" :key="variant.id" class="variant-card"><header class="variant-header"><div><strong>{{variantAccountLabel(variant)}}</strong><span>{{variantFormatLabel(variant)}} · {{variantRelationLabel(variant)}} · {{variantStatusLabel(variant)}}<b v-if="variantDirty(variant)" class="unsaved-mark"> · 未保存</b></span></div><em v-if="variant.outdated">基础稿有更新</em></header><textarea class="variant-editor" v-model="variant.text" rows="5" :disabled="variant.published"></textarea><div class="variant-options"><small v-if="variantCapability(variant)?.text_max_bytes">UTF-8 {{utf8Bytes(variant.text)}} / {{variantCapability(variant)?.text_max_bytes}} bytes</small><label><span>可见范围</span><select v-model="variant.visibility" :disabled="variant.published"><option v-for="visibility in variantCapability(variant)?.visibilities || []" :key="visibility">{{visibility}}</option></select></label><input v-if="variantCapability(variant)?.supports_cw" v-model="variant.spoiler_text" placeholder="内容警告（可选）" :disabled="variant.published"><label v-if="variantCapability(variant)?.supports_local_only" class="checkbox-option"><input type="checkbox" v-model="variant.local_only" :disabled="variant.published">仅本地</label></div><div v-if="variantCapability(variant)?.format==='mfm'" class="mfm-preview"><small>原始 MFM 预览（本地不渲染）</small><pre class="preview">{{variant.text}}</pre></div><footer class="variant-actions"><button v-if="!variant.published" class="primary-action" :disabled="variantBusy(variant)" @click="saveVariant(variant)">{{variantBusy(variant)?'处理中…':'保存版本'}}</button><button v-if="variant.outdated&&!variant.published" :disabled="variantBusy(variant)" @click="applyVariant(variant)">应用基础稿更新</button><button v-if="!variant.published&&!variantAccount(variant)?.disabled && !isBridgePlatform(variantAccount(variant)?.platform||'')" :disabled="variantBusy(variant)" @click="publish(variant)">直接发布</button><template v-else-if="!variant.published&&!variantAccount(variant)?.disabled"><button :disabled="variantBusy(variant)" @click="fillBrowser(variant)">仅填入</button><button v-if="canAutoPublish(variantAccount(variant)?.platform||'')" :disabled="variantBusy(variant)" @click="fillBrowser(variant, true)">填入并自动发布</button></template><small v-else-if="variantAccount(variant)?.disabled" class="disabled-account">账号已停用，历史版本仅供查看</small><button v-if="variant.published" :disabled="variantBusy(variant)" @click="cloneVariant(variant)">复制为新版本</button><button v-if="!variant.published&&!variantAccount(variant)?.disabled" class="danger-text" :disabled="variantBusy(variant)" @click="deleteVariant(variant)">删除版本</button></footer></li></ul>
-        <div class="bridge-status-panel" aria-label="浏览器桥接状态"><div class="section-label"><span>浏览器填入</span><small>发布入口保持可见</small></div><p class="bridge-steps">每个平台首次安装脚本并输入一次 code；此后配对会跨刷新和程序重启恢复。所有平台支持安全填入；只有已验收发布控件的平台才显示单次自动发布，带图时仍退回人工发布。</p><p class="settings-note">先<a href="/userscript/bpm-bridge.user.js">安装或更新本地用户脚本</a>。脚本只处理当前可见页面；自动发布默认关闭。</p><div class="actions bridge-controls"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button class="primary-action" @click="createBridgePairing">生成/重置配对 code</button><button @click="refreshBridgeState">刷新连接状态</button><button @click="requestCapture">捕获当前可见帖子</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><div v-if="bridgePairings.length===0" class="bridge-state">未安装/未配对：安装脚本后生成配对。</div><ul v-else class="rows bridge-pairings"><li v-for="pairing in bridgePairings" :key="pairing.id"><div><strong>{{pairing.platform}}：{{pairingState(pairing)}}</strong><code v-if="pairing.code">{{pairing.code}}</code><small v-if="pairing.page_url">当前页：{{pairing.page_url}}</small><small v-if="displayableTime(pairing.last_seen_at)">最后心跳：{{new Date(pairing.last_seen_at).toLocaleString()}}</small><small v-if="pairing.expires_at">有效期至：{{new Date(pairing.expires_at).toLocaleString()}}</small></div><div class="row-actions"><button v-if="pairing.code" @click="copyPairingCode(pairing)">复制 code</button><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></div></li></ul><p v-if="bridgeRequest" class="bridge-request-status">最近请求：{{bridgeRequest.kind}} · {{bridgeRequestState(bridgeRequest)}}<span v-if="bridgeRequest.warning"> · 提示：{{bridgeRequest.warning}}</span><span v-if="bridgeRequest.error"> · 错误：{{bridgeRequest.error}}</span></p></div>
+        <div class="bridge-status-panel" aria-label="浏览器桥接状态"><div class="section-label"><span>浏览器填入</span><small>发布入口保持可见</small><span class="help-tip" tabindex="0" role="img" aria-label="浏览器桥接帮助"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">脚本只处理你当前已登录且可见的页面；自动发布必须按次确认。</span></span></div><details class="inline-help"><summary>查看配对与发布说明</summary><p class="bridge-steps">每个平台首次安装脚本并输入一次 code；此后配对会跨刷新和重启恢复。所有平台支持安全填入；只有已验收发布控件的平台才显示单次自动发布，带图时仍退回人工发布。</p></details><p class="settings-note">先<a href="/userscript/bpm-bridge.user.js">安装或更新本地用户脚本</a>。脚本只处理当前可见页面；自动发布默认关闭。</p><div class="actions bridge-controls"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button class="primary-action" @click="createBridgePairing">生成/重置配对 code</button><button @click="refreshBridgeState">刷新连接状态</button><button @click="requestCapture">捕获当前可见帖子</button></div><p v-if="bridgeMessage" class="notice">{{bridgeMessage}}</p><div v-if="bridgePairings.length===0" class="bridge-state">未安装/未配对：安装脚本后生成配对。</div><ul v-else class="rows bridge-pairings"><li v-for="pairing in bridgePairings" :key="pairing.id"><div><strong>{{pairing.platform}}：{{pairingState(pairing)}}</strong><code v-if="pairing.code">{{pairing.code}}</code><details v-if="pairing.page_url || displayableTime(pairing.last_seen_at) || pairing.expires_at" class="pairing-details"><summary>连接详情</summary><small v-if="pairing.page_url">当前页：{{pairing.page_url}}</small><small v-if="displayableTime(pairing.last_seen_at)">最后心跳：{{new Date(pairing.last_seen_at).toLocaleString()}}</small><small v-if="pairing.expires_at">有效期至：{{new Date(pairing.expires_at).toLocaleString()}}</small></details></div><div class="row-actions"><button v-if="pairing.code" @click="copyPairingCode(pairing)">复制 code</button><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></div></li></ul><p v-if="bridgeRequest" class="bridge-request-status">最近请求：{{bridgeRequest.kind}} · {{bridgeRequestState(bridgeRequest)}}<span v-if="bridgeRequest.warning"> · 提示：{{bridgeRequest.warning}}</span><span v-if="bridgeRequest.error"> · 错误：{{bridgeRequest.error}}</span></p></div>
+        <details v-if="variants.some(variant=>variantCapability(variant)?.custom_emoji)" class="tool-section emoji-section"><summary>实例 emoji 辅助</summary><div class="tool-content"><div class="actions emoji-controls"><select v-model="emojiTargetAccountID" aria-label="emoji 所属账号"><option v-for="variant in variants.filter(item=>variantCapability(item)?.custom_emoji && variants.find(candidate=>candidate.account_id===item.account_id)?.id===item.id)" :key="variant.account_id" :value="variant.account_id">{{variantAccountLabel(variant)}}</option></select><button class="primary-action" @click="loadEmoji(emojiTargetAccountID)" :disabled="!emojiTargetAccountID || emojiLoading || emojiLoadedAccountID===emojiTargetAccountID">{{emojiLoading?'加载中…':emojiLoadedAccountID===emojiTargetAccountID?'已加载':'按需加载实例 emoji'}}</button></div><div v-if="emojiLoadedAccountID" class="emoji-browser"><input v-model="emojiFilter" placeholder="筛选 shortcode"><small>共 {{emojis.length}} 个，匹配 {{matchingEmojis.length}} 个，当前渲染 {{visibleEmojis.length}} 个</small><div class="emoji-list"><span v-for="emoji in visibleEmojis" :key="emoji.shortcode" class="emoji"><img loading="lazy" :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</span></div><button v-if="hasMoreEmojis" @click="showMoreEmoji">继续显示 50 个</button></div></div></details>
         <details class="tool-section"><summary>发布与导入工具</summary><div class="tool-content"><h3>浏览器桥接 v1</h3><small>默认仅填入；只有你对某次请求选择“填入并自动发布”后，脚本才会点击明确匹配且可见、启用的发布按钮。页面结构不匹配时停止并提示人工处理。</small>
           <h3>站外关联</h3><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前本地脚本</a>（同源地址，不会触发 file:///）。安装到油猴后，在已登录的平台页面使用配对功能。</p><form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">不关联账号</option><option v-for="account in externalPlatformAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form><form @submit.prevent="importExternal"><select v-model="externalImportAccountID" aria-label="官方导入账号"><option value="">选择 Misskey / Bluesky 账号</option><option v-for="account in profileAccounts.filter(item=>item.platform==='misskey'||item.platform==='bluesky')" :key="account.id" :value="account.id">{{account.name}} · {{account.platform}}</option></select><input v-model="externalReference" placeholder="帖子 ID、URL 或 at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button></form><ul class="rows external-post-list"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small><button class="danger-text" @click="deleteExternalPost(post)">移除本地关联</button></li></ul></div></details>
         <details class="tool-section"><summary>翻译工具</summary><div class="tool-content"><small>翻译只生成新的 detached Variant，不覆盖源版本；官方 provider 凭据从本地凭据或环境变量读取。</small><div class="actions"><select v-model="translationSourceID"><option v-for="variant in variants" :key="variant.id" :value="variant.id">{{variantAccountLabel(variant)}} · {{variant.text.slice(0,30)||'空内容'}}</option></select><select v-model="translationTargetAccountID"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button @click="translateVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="notice">{{translationMessage}}</p></div></details>
@@ -619,7 +697,7 @@ onBeforeUnmount(() => {
             <label><span>账号名称</span><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"></label>
             <label><span>平台</span><select v-model="accountPlatform" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select></label>
           </div>
-          <p class="settings-note platform-description">{{platformDescription}}</p>
+          <details class="inline-help platform-description"><summary>平台说明</summary><p class="settings-note">{{platformDescription}}</p></details>
           <label v-if="accountPlatform==='bluesky'" class="account-field"><span>远端身份</span><input v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"></label>
           <label v-if="!isBridgePlatform(accountPlatform)" class="account-field"><span>实例地址</span><input v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"></label>
           <div v-if="accountPlatform==='mastodon' || accountPlatform==='misskey'" class="connection-inline"><button type="button" class="primary-action" @click="startConnection(accountPlatform)" :disabled="!selectedProfileID || !baseURL.trim()">{{accountPlatform==='mastodon'?'OAuth 自动连接':'MiAuth 自动连接'}}</button><small>推荐。授权在当前回环服务完成，成功后自动添加账号。</small></div>
@@ -627,9 +705,9 @@ onBeforeUnmount(() => {
           <div v-if="!isBridgePlatform(accountPlatform)" class="manual-account-row"><label class="account-field"><span>环境变量名</span><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"></label><button :disabled="!selectedProfileID">手动添加</button></div>
           <button v-else class="primary-action" :disabled="!selectedProfileID">添加桥接账号</button>
         </form>
-        <ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><span>{{account.name}} · {{account.platform}}</span><button type="button" @click="removeAccount(account)">停用并移除凭据</button></li></ul>
+        <ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><div class="account-row-main"><span>{{account.name}} · {{account.platform}}</span><div class="row-actions"><button v-if="account.platform==='bluesky'" type="button" @click="diagnoseBluesky(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button v-if="isMastodon(account)" type="button" @click="diagnoseMastodon(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button type="button" @click="removeAccount(account)">停用并移除凭据</button></div></div><details v-if="account.platform==='bluesky'" class="account-diagnostic"><summary>Bluesky 连接诊断</summary><p v-if="!blueskyDiagnostic[account.id]" class="settings-note">尚未检测。测试只会创建会话，不会发布内容；凭据不会返回或写入日志。</p><div v-else :class="['diagnostic-result', blueskyDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{blueskyDiagnostic[account.id].message}}</strong><small>阶段：{{blueskyDiagnostic[account.id].stage}} · 分类：{{blueskyDiagnostic[account.id].category || 'ok'}} · {{blueskyDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="blueskyDiagnostic[account.id].handle">身份：@{{blueskyDiagnostic[account.id].handle}} · {{blueskyDiagnostic[account.id].did}}</small><small v-if="blueskyDiagnostic[account.id].hint">建议：{{blueskyDiagnostic[account.id].hint}}</small></div></details><details v-else-if="isMastodon(account)" class="account-diagnostic"><summary>Mastodon 连接诊断</summary><p v-if="!mastodonDiagnostic[account.id]" class="settings-note">尚未检测。不会发布动态或上传媒体；OPTIONS 只检查端点兼容性，不能证明写入 scope。</p><div v-else :class="['diagnostic-result', mastodonDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{mastodonDiagnostic[account.id].message}}</strong><small>阶段：{{mastodonDiagnostic[account.id].stage}} · 分类：{{mastodonDiagnostic[account.id].category || 'ok'}} · {{mastodonDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="mastodonDiagnostic[account.id].username">身份：@{{mastodonDiagnostic[account.id].username}} · {{mastodonDiagnostic[account.id].account_id}}</small><small>发帖端点：{{mastodonDiagnostic[account.id].status_write.message}}</small><small>媒体端点：{{mastodonDiagnostic[account.id].media_write.message}}</small><small v-if="mastodonDiagnostic[account.id].hint">建议：{{mastodonDiagnostic[account.id].hint}}</small></div></details></li></ul>
         <div v-if="disabledProfileAccounts.length" class="disabled-accounts"><small>已停用账号（历史仍保留）</small><ul class="rows account-list"><li v-for="account in disabledProfileAccounts" :key="account.id"><span>{{account.name}} · {{account.platform}}</span><button type="button" @click="prepareReconnect(account)">准备重新连接</button></li></ul></div><div class="section-label"><span>翻译 provider</span><small>配置不包含 key/token</small></div><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option><option value="google-gtx">Google translate_a（非官方）</option></select><p class="settings-note platform-description">{{translationProviderDescription}}</p><input v-if="translationProvider!=='google-gtx'" v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="自定义 API 地址（高级，可选）"><input v-if="translationProvider!=='google-gtx'" v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form><p v-if="translationMessage" class="notice">{{translationMessage}}</p>
-        <div class="section-label"><span>备份与凭据</span><small>离线可恢复</small></div><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前同源脚本</a>。每个平台首次输入一次 code，之后保存在油猴隔离存储；可在悬浮窗断开或从 WebUI 撤销。使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值或其他明文凭据。</p>
+        <details class="tool-section backup-section"><summary>备份与凭据 <small>离线可恢复</small></summary><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前同源脚本</a>。每个平台首次输入一次 code，之后保存在油猴隔离存储；可在悬浮窗断开或从 WebUI 撤销。使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值或其他明文凭据。</p></details>
       </section>
       <section v-else class="page-section history-page"><div class="eyebrow">历史</div><h1>发布记录</h1><p class="lede">每次发布的结果和可恢复状态都在这里。</p><PublicationList/></section>
     </main>
