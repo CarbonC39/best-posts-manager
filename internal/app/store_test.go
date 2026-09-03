@@ -272,3 +272,97 @@ func TestDeactivateAccountPreservesHistory(t *testing.T) {
 		t.Fatalf("variant history lost: %v", err)
 	}
 }
+
+func TestDeleteMediaAndUnpublishedVariantRemoveLocalFiles(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	firstPath := filepath.Join(store.MediaDir, "first")
+	if err = os.WriteFile(firstPath, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "first.png", MIME: "image/png", Path: firstPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.DeleteMedia(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(firstPath); !os.IsNotExist(err) {
+		t.Fatalf("deleted media file remains: %v", err)
+	}
+	secondPath := filepath.Join(store.MediaDir, "second")
+	if err = os.WriteFile(secondPath, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.AddMedia(ctx, Media{TopicID: topic.ID, VariantID: variant.ID, Filename: "second.png", MIME: "image/png", Path: secondPath}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.DeleteVariant(ctx, variant.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.GetVariant(ctx, variant.ID); err != ErrNotFound {
+		t.Fatalf("variant was not deleted: %v", err)
+	}
+	if _, err = os.Stat(secondPath); !os.IsNotExist(err) {
+		t.Fatalf("variant media file remains: %v", err)
+	}
+}
+
+func TestDeleteVariantPreservesPublicationHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	if _, err = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "published"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.DeleteVariant(ctx, variant.ID); err == nil {
+		t.Fatal("variant with publication history must not be deleted")
+	}
+	if _, err = store.GetVariant(ctx, variant.ID); err != nil {
+		t.Fatalf("historical variant was removed: %v", err)
+	}
+}
+
+func TestDeletingMediaDoesNotRemoveAFileStillReferencedByAnotherRecord(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	path := filepath.Join(store.MediaDir, "shared")
+	if err = os.WriteFile(path, []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := store.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "one.png", MIME: "image/png", Path: path})
+	second, _ := store.AddMedia(ctx, Media{TopicID: topic.ID, Filename: "two.png", MIME: "image/png", Path: path})
+	if err = store.DeleteMedia(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(path); err != nil {
+		t.Fatalf("shared file was removed while another record referenced it: %v", err)
+	}
+	if err = store.DeleteMedia(ctx, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("unreferenced file remains: %v", err)
+	}
+}

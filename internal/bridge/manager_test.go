@@ -104,6 +104,55 @@ func TestFillCanUseLastConnectedPageAndFilledIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPairingTokenSurvivesManagerRestart(t *testing.T) {
+	m, _, _, _ := bridgeFixture(t)
+	pair, err := m.CreatePairing("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello, err := m.Hello(pair.Code, "x", "https://x.com/compose", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := m.Store.DataDir
+	if err = m.Store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := app.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored := NewManager(reopened)
+	if err = restored.AuthenticatePairing(hello.Token, hello.ID, "x", "https://x.com/compose", ""); err != nil {
+		t.Fatalf("persisted token did not authenticate after restart: %v", err)
+	}
+	again, err := restored.CreatePairing("x")
+	if err != nil || again.Code == "" || again.ID == hello.ID {
+		t.Fatalf("explicit re-pair should issue a fresh one-time code: %+v %v", again, err)
+	}
+}
+
+func TestNewPairingRotatesOldPlatformToken(t *testing.T) {
+	m, _, _, _ := bridgeFixture(t)
+	first, _ := m.CreatePairing("x")
+	old, err := m.Hello(first.Code, "x", "https://x.com/compose", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _ := m.CreatePairing("x")
+	current, err := m.Hello(second.Code, "x", "https://x.com/compose", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.AuthenticatePairing(old.Token, old.ID, "x", "https://x.com/compose", ""); err == nil {
+		t.Fatal("rotated token must be rejected")
+	}
+	if err = m.AuthenticatePairing(current.Token, current.ID, "x", "https://x.com/compose", ""); err != nil {
+		t.Fatalf("new token must authenticate: %v", err)
+	}
+}
+
 func TestFillRejectsDeactivatedAccount(t *testing.T) {
 	m, _, account, variant := bridgeFixture(t)
 	pair, _ := m.CreatePairing("x")

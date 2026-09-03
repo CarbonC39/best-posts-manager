@@ -61,7 +61,7 @@ Profile 仅做内容分组；Account 负责平台连接。一个 Account 只能�
 
 首版的“移除账号”是可逆性较好的停用：账号行保留并标记 disabled，清空本地 credential 引用及凭据文件，活跃选择器隐藏它；已有 Variant、Publication 和 ExternalPost 仍可查看，但不能再次发布或桥接填入。
 
-平台长期凭据通过本地凭据存储或操作系统 keychain 保存，SQLite 只保存引用和非敏感元数据；它们不出现在 API 响应、CLI 普通输出、错误消息或日志中。浏览器桥接的短期 bearer 是例外：只由 `hello` 成功响应签发一次，随后仅以哈希留在 Go 进程内存。用户主动导出数据时默认排除凭据，导入时明确提示可能含敏感内容。
+平台长期凭据通过本地凭据存储或操作系统 keychain 保存，SQLite 只保存引用和非敏感元数据；它们不出现在 API 响应、CLI 普通输出、错误消息或日志中。浏览器桥接的 bearer 只由 `hello` 成功响应签发一次：明文只保存在油猴隔离存储，SQLite 仅保存不可逆哈希、平台和有效期，以便本地程序重启后恢复配对。用户主动导出数据时默认排除明文凭据，导入时明确提示可能含敏感元数据。
 
 ## 平台能力与 adapter
 
@@ -89,19 +89,19 @@ X、微博、小红书和 QQ 空间无法依赖稳定的公开发布 API 时，�
 
 ### 协议
 
-节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发八小时 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`filled`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次，token 只存内存哈希；用户脚本将 bearer 放在油猴隔离存储以支持页面刷新，不放站点 localStorage，服务端 TTL/撤销仍立即生效。撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL、日志或 SQLite。
+节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发 90 天 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`filled`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次；明文 token 按平台放在油猴隔离存储，不放站点 localStorage，服务端在 SQLite 中只持久化哈希和有效期，因此页面刷新和本地程序重启都不要求重新输入 code。重新配对会轮换该平台 token，撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL 或日志，明文 token 不进 SQLite。
 
 本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持脚本管理器检查更新。HTTP 日志只记录 method、path、status 和耗时，不记录 query 或 body；连接日志只记录平台与阶段。WebUI 显示配对的当前 page URL、最后心跳、有效/撤销状态和最近请求状态；“已连接”要求最近 30 秒内有心跳，避免把已关闭的平台页显示为在线。已连接配对创建 fill/capture 时可省略 page URL，服务端使用内存中的已校验页面，而脚本每次请求仍提交并校验实际当前页面。
 
-管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication，脚本只填充，用户人工发布后回传 URL/ID；超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本没有发布按钮点击权限，也不调用隐藏 API。
+管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication：默认只填充；用户对当前纯文本请求明确选择自动发布时，请求带 `auto_publish=true`，脚本才尝试点击该平台已知、可见且启用的发布按钮，选择器不匹配就停止并提示。网页的媒体上传完成状态无法稳定跨平台判断，因此带媒体的自动发布请求会退回人工检查和发布。无论是否自动点击，用户都应核对平台结果；超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本不调用隐藏 API。
 
-本地端点默认只接受一次配对后短期有效的请求，并拒绝任意跨域调用。token 不写入网页内容、URL 或普通日志。脚本应显示连接状态和实际发送的数据摘要，让用户能撤销配对。桥接端点只服务当前本地用户，不是通用远程 API。
+本地端点默认只接受有效且未撤销的配对，并拒绝任意跨域调用。token 不写入网页内容、URL 或普通日志。脚本应显示连接状态和实际发送的数据摘要，让用户能撤销配对。桥接端点只服务当前本地用户，不是通用远程 API。
 
 ### 导入和发布边界
 
 导入只读取页面当前可见 DOM 及用户主动展开的内容。私密帖子依赖用户在浏览器中的既有权限；程序不绕过登录、验证码、付费墙、权限检查或反爬机制，不调用隐藏接口来扩大可见范围。无法读取的内容标记为不完整，由用户补充。
 
-发布时默认把 Variant 填入平台编辑框，随后由用户在页面检查并人工点击最终发布。脚本可回传用户确认后的远端 URL/ID，但不应在没有明确确认的情况下自动点击发布。QQ 空间的可见范围、说说格式和图片顺序属于平台选项；脚本无法可靠设置时必须提示用户检查当前页面选择。
+发布时默认把 Variant 填入平台编辑框，随后由用户在页面检查并人工点击最终发布。用户也可以对单次请求选择“填入并自动发布”；这不是账号级默认值，脚本只点击已知、可见且启用的发布控件，页面结构变化或匹配不唯一时必须停止并提示。QQ 空间的可见范围、说说格式和图片顺序属于平台选项；脚本无法可靠设置时必须提示用户检查当前页面选择。
 
 ## 站外帖子与快照
 
@@ -142,7 +142,7 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 提供导出 SQLite 数据、媒体文件和不含凭据的清单的备份命令；恢复前校验版本、校验值和迁移状态，避免覆盖当前数据。备份应能在本地离线完成。凭据单独重新配置，不把 token 混入普通备份。数据库迁移要可检测失败并保留原文件，发布历史是不可丢失的审计线索。
 
-节点 4 使用标准库 ZIP：`bpm backup create archive.zip` 先用 SQLite `VACUUM INTO` 生成一致快照，再收集 `media/` 和 manifest（格式版本、schema 版本、文件大小、SHA-256）。恢复先在临时目录验证所有路径、清单、校验和及 SQLite migration 状态，目标必须不存在或为空，验证成功后才重命名进入目标目录；非空目标和损坏归档都拒绝。归档中没有环境变量值、`credentials.json` 或 token。v5 migration 在单独事务中建立翻译配置/记录表，v6 在独立事务中加入 Account/TranslationConfig 的 `credential_ref`，失败会 rollback，不推进 migration 版本。
+节点 4 使用标准库 ZIP：`bpm backup create archive.zip` 先用 SQLite `VACUUM INTO` 生成一致快照，再收集 `media/` 和 manifest（格式版本、schema 版本、文件大小、SHA-256）。恢复先在临时目录验证所有路径、清单、校验和及 SQLite migration 状态，目标必须不存在或为空，验证成功后才重命名进入目标目录；非空目标和损坏归档都拒绝。归档中没有环境变量值、`credentials.json` 或明文 token；SQLite 快照会包含用于恢复本机桥接配对的不可逆 token 哈希。v5 migration 在单独事务中建立翻译配置/记录表，v6 在独立事务中加入 Account/TranslationConfig 的 `credential_ref`，失败会 rollback，不推进 migration 版本。
 
 ### 本地凭据与自动连接
 
@@ -152,7 +152,7 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 ## 明确排除项
 
-首版不做多人协作/组织/RBAC、云端部署与同步、时间线或关注内容抓取、全量历史导入、统计和粉丝分析、绕过平台访问限制、无人值守浏览器发布，以及为了“统一格式”而强制损失平台特性的转换。
+首版不做多人协作/组织/RBAC、云端部署与同步、时间线或关注内容抓取、全量历史导入、统计和粉丝分析、绕过平台访问限制、未明确确认的浏览器发布，以及为了“统一格式”而强制损失平台特性的转换。
 
 ## 关键决策记录
 

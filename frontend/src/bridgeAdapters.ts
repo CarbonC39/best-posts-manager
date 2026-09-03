@@ -1,13 +1,13 @@
 export type BridgeMedia = { id?: string; filename: string; mime: string; alt_text?: string; size?: number; url?: string }
-export type BridgeRequest = { platform: string; page_url: string; text?: string; media?: BridgeMedia[] }
+export type BridgeRequest = { platform: string; page_url: string; text?: string; media?: BridgeMedia[]; auto_publish?: boolean }
 export type Capture = { text: string; url: string; media: BridgeMedia[]; incomplete: boolean; incomplete_reason?: string }
 
-type Adapter = { selectors: string[]; captureSelectors: string[]; mediaSelectors: string[] }
+type Adapter = { selectors: string[]; captureSelectors: string[]; mediaSelectors: string[]; publishSelectors: string[] }
 const adapters: Record<string, Adapter> = {
-  x: { selectors: ['[data-testid="tweetTextarea_0"]', 'textarea[aria-label*="Post"]', 'textarea', '[contenteditable="true"]'], captureSelectors: ['article [data-testid="tweetText"]', 'article'], mediaSelectors: ['input[type="file"]'] },
-  weibo: { selectors: ['textarea[placeholder*="分享"]', 'textarea', '[contenteditable="true"]'], captureSelectors: ['.WB_text', '[node-type="feed_list_content"]'], mediaSelectors: ['input[type="file"]'] },
-  xiaohongshu: { selectors: ['textarea', '[contenteditable="true"]'], captureSelectors: ['.note-content', '[class*="note-content"]'], mediaSelectors: ['input[type="file"]'] },
-  qzone: { selectors: ['textarea', '[contenteditable="true"]'], captureSelectors: ['.feed-content', '[class*="content"]'], mediaSelectors: ['input[type="file"]'] },
+  x: { selectors: ['[data-testid="tweetTextarea_0"]', 'textarea[aria-label*="Post"]', 'textarea', '[contenteditable="true"]'], captureSelectors: ['article [data-testid="tweetText"]', 'article'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'] },
+  weibo: { selectors: ['textarea[placeholder*="分享"]', 'textarea', '[contenteditable="true"]'], captureSelectors: ['.WB_text', '[node-type="feed_list_content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['button[node-type="submit"]', '[node-type="submit"]'] },
+  xiaohongshu: { selectors: ['textarea', '[contenteditable="true"]'], captureSelectors: ['.note-content', '[class*="note-content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['button[class*="publish"]', '[role="button"][class*="publish"]'] },
+  qzone: { selectors: ['textarea', '[contenteditable="true"]'], captureSelectors: ['.feed-content', '[class*="content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['button[node-type="submit"]', '[role="button"][aria-label*="发表"]'] },
 }
 
 function adapter(platform: string): Adapter {
@@ -38,6 +38,20 @@ export function fillVisible(platform: string, text: string): { mediaInput?: HTML
   setText(element, text)
   const mediaInput = document.querySelector(adapter(platform).mediaSelectors[0]) as HTMLInputElement | null
   return mediaInput ? { mediaInput } : {}
+}
+/** Click only an explicitly configured, visible, enabled publish control. */
+export function clickKnownPublish(platform: string): string | null {
+  for (const selector of adapter(platform).publishSelectors) {
+    const candidates = document.querySelectorAll<HTMLElement>(selector)
+    for (const element of candidates) {
+      if (element.hidden || element.getAttribute('aria-hidden') === 'true' || element.getAttribute('aria-disabled') === 'true' || (element as HTMLButtonElement).disabled) continue
+      const style = getComputedStyle(element)
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue
+      element.click()
+      return null
+    }
+  }
+  return '当前页面未找到明确的可见发布按钮，未自动点击；请人工发布'
 }
 export async function fillVisibleWithMedia(platform: string, request: BridgeRequest, fetcher = fetch): Promise<string[]> {
   const { mediaInput } = fillVisible(platform, request.text || '')

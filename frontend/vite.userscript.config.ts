@@ -5,8 +5,8 @@ import { resolve } from 'node:path'
 const metadata = `// ==UserScript==
 // @name         Best Post Manager local bridge
 // @namespace    best-post-manager
-// @version      1.2.0
-// @description  Fill visible editors and capture visible posts; final publishing always stays manual.
+// @version      1.3.0
+// @description  Fill visible editors, optionally publish on explicit request, and capture visible posts.
 // @match        https://x.com/*
 // @match        https://*.x.com/*
 // @match        https://twitter.com/*

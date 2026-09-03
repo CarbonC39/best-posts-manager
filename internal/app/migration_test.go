@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestV1DatabaseMigratesToV7WithoutDataLoss(t *testing.T) {
+func TestV1DatabaseMigratesToV8WithoutDataLoss(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
 	if err != nil {
@@ -32,8 +32,12 @@ func TestV1DatabaseMigratesToV7WithoutDataLoss(t *testing.T) {
 		t.Fatalf("unexpected migrated local_only: %d", local)
 	}
 	var version int
-	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
+	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
 		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+	var pairings int
+	if err = st.DB.QueryRow(`SELECT count(*) FROM bridge_pairings`).Scan(&pairings); err != nil || pairings != 0 {
+		t.Fatalf("bridge pairing migration failed: %d %v", pairings, err)
 	}
 	var cid string
 	if err = st.DB.QueryRow(`SELECT remote_cid FROM publications LIMIT 1`).Scan(&cid); err != sql.ErrNoRows {
@@ -149,5 +153,36 @@ func TestV7MigrationFailureRollsBackDisabledColumn(t *testing.T) {
 	}
 	if err = check.QueryRow(`SELECT count(*) FROM pragma_table_info('accounts') WHERE name='disabled'`).Scan(&columns); err != nil || columns != 0 {
 		t.Fatalf("partial account deactivation migration: %d %v", columns, err)
+	}
+}
+
+func TestV8MigrationFailureRollsBackBridgeTable(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(7); CREATE TRIGGER block_v8 BEFORE INSERT ON schema_migrations WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'block v8'); END;`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(context.Background(), dir); err == nil {
+		t.Fatal("migration should fail")
+	}
+	check, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version, tables int
+	if err = check.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if err = check.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bridge_pairings'`).Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("partial bridge migration: %d %v", tables, err)
 	}
 }

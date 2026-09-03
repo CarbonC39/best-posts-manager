@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { captureVisible, fillVisible, supportedBridgePlatforms } from '../src/bridgeAdapters'
+import { captureVisible, clickKnownPublish, fillVisible, supportedBridgePlatforms } from '../src/bridgeAdapters'
 
 describe('browser bridge adapters', () => {
   it('supports the four explicit page platforms and fills visible editors', () => {
@@ -39,10 +39,18 @@ describe('browser bridge adapters', () => {
 	document.body.innerHTML = fixtures[0][1]
 	expect(captureVisible('x', fixtures[0][2]).media[0]).toMatchObject({ alt_text: 'x image', url: 'https://pbs.example/x.jpg' })
   })
-	it('contains no programmatic final-publish click path', () => {
+	it('auto-publishes only through an explicit request and a known visible control', () => {
+	document.body.innerHTML = '<button data-testid="tweetButton" style="display:none">Hidden</button><button data-testid="tweetButton">Post</button>'
+	const publish = document.querySelectorAll('button')[1] as HTMLButtonElement
+	let clicked = false
+	publish.addEventListener('click', () => { clicked = true })
+	expect(clickKnownPublish('x')).toBeNull()
+	expect(clicked).toBe(true)
+	document.body.innerHTML = '<button>unrelated</button>'
+	expect(clickKnownPublish('x')).toContain('未自动点击')
 	const source = readFileSync('src/bridgeUserscript.ts', 'utf8')
-	expect(source).not.toMatch(/\.click\s*\(/)
-	expect(source).toContain('正在写入当前可见编辑器（绝不发布）')
+	expect(source).toContain('request.auto_publish && request.media?.length')
+	expect(source).toContain('正在填入并检查发布条件')
 	expect(source).toContain('fillVisibleWithMedia(platform, request')
 	expect(source).toContain("attachShadow({ mode: 'closed' })")
   })

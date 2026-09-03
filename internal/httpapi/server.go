@@ -418,6 +418,18 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "media" && r.Method == http.MethodPost:
 		s.upload(w, r)
 		return
+	case strings.HasPrefix(path, "media/"):
+		if r.Method != http.MethodDelete {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		id := strings.TrimPrefix(path, "media/")
+		if err := s.Svc.Store.DeleteMedia(ctx, id); err != nil {
+			fail(w, 400, err)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		}
+		return
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/deactivate"):
 		if r.Method != http.MethodDelete {
 			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
@@ -600,6 +612,14 @@ func (s *Server) variant(w http.ResponseWriter, r *http.Request, id string) {
 			fail(w, 400, e)
 		} else {
 			writeJSON(w, 200, v)
+		}
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if e := s.Svc.Store.DeleteVariant(r.Context(), id); e != nil {
+			fail(w, 400, e)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		}
 		return
 	}

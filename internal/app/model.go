@@ -119,6 +119,17 @@ type TranslationConfig struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// BridgePairing stores only the server-side hash and lifecycle metadata. The
+// bearer token and page URL are never persisted.
+type BridgePairing struct {
+	ID             string    `json:"id"`
+	Platform       string    `json:"platform"`
+	TokenHash      string    `json:"-"`
+	TokenExpiresAt time.Time `json:"token_expires_at"`
+	Revoked        bool      `json:"revoked"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 type Translation struct {
 	ID              string    `json:"id"`
 	SourceVariantID string    `json:"source_variant_id"`

@@ -178,6 +178,28 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 		}
 		rollback = false
 	}
+	if version < 8 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, txErr = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS bridge_pairings (id TEXT PRIMARY KEY, platform TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL DEFAULT '', token_expires_at TEXT NOT NULL DEFAULT '', revoked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(8)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
 	return nil
 }
 
@@ -186,6 +208,47 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 func (s *Store) RecoverPublishing(ctx context.Context) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='needs_confirmation', error_category='unknown', error_message='程序重启时发布请求仍在进行；请到平台确认结果后再手动关联，勿盲目重试' WHERE status='publishing'`)
 	return err
+}
+
+func (s *Store) ListBridgePairings(ctx context.Context) ([]BridgePairing, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,platform,token_hash,token_expires_at,revoked,created_at FROM bridge_pairings ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]BridgePairing, 0)
+	for rows.Next() {
+		var p BridgePairing
+		var expires, created string
+		var revoked int
+		if err = rows.Scan(&p.ID, &p.Platform, &p.TokenHash, &expires, &revoked, &created); err != nil {
+			return nil, err
+		}
+		p.TokenExpiresAt, p.CreatedAt = parseTime(expires), parseTime(created)
+		p.Revoked = revoked != 0
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveBridgePairing(ctx context.Context, p BridgePairing) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO bridge_pairings(id,platform,token_hash,token_expires_at,revoked,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(platform) DO UPDATE SET id=excluded.id, token_hash=excluded.token_hash, token_expires_at=excluded.token_expires_at, revoked=excluded.revoked`, p.ID, p.Platform, p.TokenHash, p.TokenExpiresAt.Format(time.RFC3339Nano), boolInt(p.Revoked), p.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) RevokeBridgePairing(ctx context.Context, id string) error {
+	result, err := s.DB.ExecContext(ctx, `UPDATE bridge_pairings SET revoked=1 WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -673,6 +736,126 @@ func (s *Store) ListMedia(ctx context.Context, topicID string) ([]Media, error) 
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// DeleteMedia removes one local media record and its file. Files are accepted
+// only when they are direct children of the configured media directory.
+func (s *Store) DeleteMedia(ctx context.Context, mediaID string) error {
+	var path string
+	if err := s.DB.QueryRowContext(ctx, `SELECT path FROM media WHERE id=?`, mediaID).Scan(&path); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return err
+	}
+	if filepath.Dir(path) != s.MediaDir || filepath.Base(path) == "." {
+		return errors.New("media path is outside the local media directory")
+	}
+	if info, err := os.Lstat(path); err != nil && !os.IsNotExist(err) {
+		return err
+	} else if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("refusing to delete symlink media")
+	}
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM media WHERE id=?`, mediaID)
+	if err != nil {
+		return err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		if rowsErr != nil {
+			return rowsErr
+		}
+		return ErrNotFound
+	}
+	var remaining int
+	if err = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM media WHERE path=?`, path).Scan(&remaining); err != nil {
+		return fmt.Errorf("media record deleted but shared-file check failed: %w", err)
+	}
+	if remaining > 0 {
+		return nil
+	}
+	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("media record deleted but local file cleanup failed: %w", err)
+	}
+	return nil
+}
+
+// DeleteVariant removes an unpublished variant, its local media, and translation
+// records that refer to it. Publication history prevents deletion.
+func (s *Store) DeleteVariant(ctx context.Context, variantID string) error {
+	var path string
+	if err := s.DB.QueryRowContext(ctx, `SELECT id FROM variants WHERE id=?`, variantID).Scan(new(string)); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return err
+	}
+	var publications int
+	if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM publications WHERE variant_id=?`, variantID).Scan(&publications); err != nil {
+		return err
+	}
+	if publications > 0 {
+		return errors.New("variant has publication history and cannot be deleted; keep it for audit")
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT path FROM media WHERE variant_id=?`, variantID)
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for rows.Next() {
+		if err = rows.Scan(&path); err != nil {
+			rows.Close()
+			return err
+		}
+		if filepath.Dir(path) != s.MediaDir || filepath.Base(path) == "." {
+			rows.Close()
+			return errors.New("media path is outside the local media directory")
+		}
+		if info, statErr := os.Lstat(path); statErr != nil && !os.IsNotExist(statErr) {
+			rows.Close()
+			return statErr
+		} else if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			rows.Close()
+			return errors.New("refusing to delete symlink media")
+		}
+		paths = append(paths, path)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM translations WHERE source_variant_id=? OR target_variant_id=?`, variantID, variantID); err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM media WHERE variant_id=?`, variantID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM variants WHERE id=?`, variantID)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	for _, mediaPath := range paths {
+		var remaining int
+		if err = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM media WHERE path=?`, mediaPath).Scan(&remaining); err != nil {
+			return fmt.Errorf("variant deleted but shared-file check failed: %w", err)
+		}
+		if remaining > 0 {
+			continue
+		}
+		if err = os.Remove(mediaPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("variant deleted but local media cleanup failed: %w", err)
+		}
+	}
+	return nil
 }
 func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publication, error) {
 	if p.ID == "" {

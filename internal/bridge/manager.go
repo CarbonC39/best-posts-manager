@@ -19,7 +19,7 @@ import (
 const (
 	ProtocolVersion = "v1"
 	PairingTTL      = 10 * time.Minute
-	TokenTTL        = 8 * time.Hour
+	TokenTTL        = 90 * 24 * time.Hour
 	HeartbeatTTL    = 30 * time.Second
 	RequestTTL      = 15 * time.Minute
 	MaxTextBytes    = 32 << 10
@@ -78,6 +78,7 @@ type Request struct {
 	PageURL          string    `json:"page_url"`
 	Text             string    `json:"text,omitempty"`
 	Media            []Media   `json:"media,omitempty"`
+	AutoPublish      bool      `json:"auto_publish"`
 	Status           string    `json:"status"`
 	ResultURL        string    `json:"result_url,omitempty"`
 	RemoteID         string    `json:"remote_id,omitempty"`
@@ -91,7 +92,15 @@ type Request struct {
 }
 
 func NewManager(s *app.Store) *Manager {
-	return &Manager{Store: s, Now: time.Now, pairs: make(map[string]*pairing), requests: make(map[string]*Request)}
+	m := &Manager{Store: s, Now: time.Now, pairs: make(map[string]*pairing), requests: make(map[string]*Request)}
+	if s != nil {
+		if persisted, err := s.ListBridgePairings(context.Background()); err == nil {
+			for _, saved := range persisted {
+				m.pairs[saved.ID] = &pairing{ID: saved.ID, Platform: saved.Platform, TokenHash: saved.TokenHash, TokenExpiresAt: saved.TokenExpiresAt, Revoked: saved.Revoked, CodeUsed: saved.TokenHash != ""}
+			}
+		}
+	}
+	return m
 }
 func randomValue(n int) string {
 	b := make([]byte, n)
@@ -109,12 +118,12 @@ func (m *Manager) CreatePairing(platform string) (Pairing, error) {
 	if !supported[platform] {
 		return Pairing{}, fmt.Errorf("unsupported bridge platform %q", platform)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	now := m.Now()
 	code := randomValue(4)
 	p := &pairing{ID: randomValue(8), Platform: platform, CodeHash: hash(code), CodeExpiresAt: now.Add(PairingTTL)}
-	m.mu.Lock()
 	m.pairs[p.ID] = p
-	m.mu.Unlock()
 	return Pairing{ID: p.ID, Version: ProtocolVersion, Platform: platform, Code: code, ExpiresAt: p.CodeExpiresAt}, nil
 }
 func pairingView(p *pairing, now time.Time) Pairing {
@@ -152,6 +161,11 @@ func (m *Manager) Revoke(id string) error {
 	p, ok := m.pairs[id]
 	if !ok {
 		return app.ErrNotFound
+	}
+	if m.Store != nil && p.CodeUsed {
+		if err := m.Store.RevokeBridgePairing(context.Background(), id); err != nil {
+			return err
+		}
 	}
 	p.Revoked = true
 	return nil
@@ -196,13 +210,26 @@ func (m *Manager) Hello(code, platform, pageURL, origin string) (Pairing, error)
 		return Pairing{}, errors.New("pairing code is invalid, expired, or already used")
 	}
 	token := randomValue(24)
+	now := m.Now()
+	tokenHash := hash(token)
+	tokenExpiresAt := now.Add(TokenTTL)
+	if m.Store != nil {
+		if err := m.Store.SaveBridgePairing(context.Background(), app.BridgePairing{ID: p.ID, Platform: p.Platform, TokenHash: tokenHash, TokenExpiresAt: tokenExpiresAt, CreatedAt: now}); err != nil {
+			return Pairing{}, err
+		}
+	}
+	for _, existing := range m.pairs {
+		if existing != p && existing.Platform == platform && existing.CodeUsed {
+			existing.Revoked = true
+		}
+	}
 	p.CodeUsed = true
 	p.CodeHash = ""
-	p.TokenHash = hash(token)
-	p.TokenExpiresAt = m.Now().Add(TokenTTL)
+	p.TokenHash = tokenHash
+	p.TokenExpiresAt = tokenExpiresAt
 	p.PageURL = pageURL
-	p.LastSeenAt = m.Now()
-	view := pairingView(p, m.Now())
+	p.LastSeenAt = now
+	view := pairingView(p, now)
 	view.Token = token
 	return view, nil
 }
@@ -244,6 +271,10 @@ func (m *Manager) AuthenticatePairing(token, pairingID, platform, pageURL, origi
 	return m.authenticate(token, pairingID, platform, pageURL, origin)
 }
 func (m *Manager) CreateFill(ctx context.Context, pairingID, variantID, pageURL string) (Request, error) {
+	return m.CreateFillWithOptions(ctx, pairingID, variantID, pageURL, false)
+}
+
+func (m *Manager) CreateFillWithOptions(ctx context.Context, pairingID, variantID, pageURL string, autoPublish bool) (Request, error) {
 	pairPlatform, err := m.PairingPlatform(pairingID)
 	if err != nil {
 		return Request{}, err
@@ -283,7 +314,7 @@ func (m *Manager) CreateFill(ctx context.Context, pairingID, variantID, pageURL 
 	if err != nil {
 		return Request{}, err
 	}
-	return m.saveRequest(Request{Kind: "fill", PairingID: pairingID, Platform: a.Platform, AccountID: a.ID, TopicID: v.TopicID, VariantID: v.ID, PublicationID: p.ID, PageURL: pageURL, Text: v.Text, Media: selected, Status: "pending"})
+	return m.saveRequest(Request{Kind: "fill", PairingID: pairingID, Platform: a.Platform, AccountID: a.ID, TopicID: v.TopicID, VariantID: v.ID, PublicationID: p.ID, PageURL: pageURL, Text: v.Text, Media: selected, AutoPublish: autoPublish, Status: "pending"})
 }
 func (m *Manager) CreateCapture(ctx context.Context, pairingID, topicID, accountID, platform, pageURL string) (Request, error) {
 	pairPlatform, err := m.PairingPlatform(pairingID)

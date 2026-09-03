@@ -85,9 +85,10 @@ func (s *Server) bridgeAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "requests/fill" && r.Method == http.MethodPost {
 		var req struct {
-			PairingID string `json:"pairing_id"`
-			VariantID string `json:"variant_id"`
-			PageURL   string `json:"page_url"`
+			PairingID   string `json:"pairing_id"`
+			VariantID   string `json:"variant_id"`
+			PageURL     string `json:"page_url"`
+			AutoPublish bool   `json:"auto_publish"`
 		}
 		if !decodeBridge(w, r, &req) {
 			return
@@ -96,7 +97,7 @@ func (s *Server) bridgeAdmin(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, e)
 			return
 		}
-		v, e := b.CreateFill(r.Context(), req.PairingID, req.VariantID, req.PageURL)
+		v, e := b.CreateFillWithOptions(r.Context(), req.PairingID, req.VariantID, req.PageURL, req.AutoPublish)
 		if e != nil {
 			fail(w, 400, e)
 		} else {
