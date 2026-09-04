@@ -156,6 +156,8 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 `credential.Store` 是小型可替换接口；默认实现把随机引用到 secret 的映射放在数据目录 `credentials.json`，目录 0700、文件 0600，写入使用临时文件原子替换并拒绝 symlink/过宽权限。SQLite 只保存 `credential_ref`，普通 API、日志、CLI 和备份不返回 secret。手动账号可直接写入本地 secret，也可使用 `token_env` fallback；已有账号编辑采用“写新 secret→一次性原子替换引用→删除旧 ref”，失败时旧凭据保持可用。Mastodon/Misskey 发布优先解析引用，空引用时兼容读取 `token_env`；Bluesky 的 app password 同样只在创建会话时使用，session JWT 不落盘。Bluesky PDS 统一规范化为空值默认 `https://bsky.social`、裸域名补 HTTPS、去尾斜杠，并拒绝路径/query/userinfo。测试可注入内存 Store。
 
+本地历史的删除与远端操作严格分离：已发布版本删除会在事务中清理该版本的 translations、publications、版本媒体记录和版本本身，提交后仅删除无其他引用的本地媒体文件；终态 publication 可单独移除，pending/publishing/needs_confirmation 保留以避免竞态。永久删除账号仅允许已停用账号，并在事务中删除账号版本、关联发布/翻译/站外关联和媒体后再删除账号；远端帖子永不由这些动作删除。WebUI 的操作反馈使用固定顶部、可关闭、自动消失的 aria-live toast，详细诊断仍留在对应卡片。
+
 连接管理器只在进程内保存短期 OAuth state/client secret 或 MiAuth session，默认十分钟过期且一次性消费。Mastodon start 注册本地应用，优先发现 granular `write:statuses write:media`，否则注册与授权都使用高层 `write`；callback 仅接受回环 Host 并以固定相对地址回跳，失败清理临时凭据。Misskey 使用官方 `/miauth/{session}` 和 `/api/miauth/{session}/check`，权限为 `write:notes,write:drive`。这两个流程只创建单用户本地 Account，不共享账号或引入通用 OAuth 框架。
 
 ## 明确排除项

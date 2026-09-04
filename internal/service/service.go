@@ -355,6 +355,26 @@ func (s *Service) DeactivateAccount(ctx context.Context, accountID string) (app.
 	return s.Store.DeactivateAccount(ctx, accountID)
 }
 
+func (s *Service) DeleteAccountPermanently(ctx context.Context, accountID string) (app.Account, error) {
+	a, err := s.Store.GetAccount(ctx, accountID)
+	if err != nil {
+		return app.Account{}, err
+	}
+	if !a.Disabled {
+		return app.Account{}, fmt.Errorf("%w: disable the account before permanently deleting it", app.ErrConflict)
+	}
+	if a.CredentialRef != "" && s.Credentials != nil {
+		if err = s.Credentials.Delete(a.CredentialRef); err != nil {
+			return app.Account{}, errors.New("could not remove local credential; account remains")
+		}
+	}
+	return s.Store.DeleteAccountPermanently(ctx, accountID)
+}
+
+func (s *Service) DeletePublication(ctx context.Context, publicationID string) error {
+	return s.Store.DeletePublication(ctx, publicationID)
+}
+
 func (s *Service) ImportExternal(ctx context.Context, topicID, accountID, reference string) (app.ExternalPost, error) {
 	a, err := s.Store.GetAccount(ctx, accountID)
 	if err != nil {

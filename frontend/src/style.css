@@ -56,6 +56,9 @@ select { min-width: 130px; }
 button { border-radius: 5px; border: 1px solid #deddd7; padding: 8px 12px; color: #66635d; background: #fff; font-size: 13px; }
 button:hover { background: #f5f5f1; }
 button:disabled { cursor: not-allowed; opacity: .52; }
+.icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 5px; border-color: transparent; color: #89857d; background: transparent; }
+.icon-button:hover { color: #4f765b; background: #edf3ee; }
+.icon-button svg { width: 17px; height: 17px; }
 .primary-action { border-color: #668a70; color: #fff; background: #668a70; }
 .primary-action:hover { background: #557a60; }
 .topic-create { max-width: 650px; margin-top: 26px; }
@@ -63,16 +66,29 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .empty-state { margin: 22px 0; padding: 18px 0; color: #aaa79f; font-size: 14px; }
 
 .notice { margin: 0 auto 25px; width: min(100%, 920px); padding: 10px 13px; border: 1px solid #dce9df; border-radius: 5px; color: #53725b; background: #f2f8f3; font-size: 13px; }
+.toast { position: fixed; z-index: 20; top: 18px; left: 50%; display: flex; align-items: center; gap: 14px; width: min(520px, calc(100vw - 32px)); transform: translateX(-50%); padding: 10px 12px 10px 14px; border: 1px solid #dce9df; border-radius: 7px; color: #53725b; background: rgba(242,248,243,.97); box-shadow: 0 8px 24px rgba(55,53,47,.12); font-size: 13px; }
+.toast span { flex: 1; }
+.toast button { border: 0; padding: 0 3px; color: inherit; background: transparent; font-size: 18px; line-height: 1; }
+.toast-error { border-color: #efd2cd; color: #8a5a54; background: rgba(250,239,237,.98); }
+.toast-warning { border-color: #eadabd; color: #876b3c; background: rgba(251,247,235,.98); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .rows { list-style: none; margin: 14px 0 0; padding: 0; }
 .rows li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid #f0efeb; }
 .rows span { color: #918e87; font-size: 13px; }
 .rows em { margin-left: 9px; color: #a2773f; font-style: normal; }
+.topics-page { width: min(100%, 920px); }
+.topics-page h1 { margin-bottom: 2px; }
+.topics-page .lede { max-width: 560px; }
+.topic-list { margin-top: 12px; border-top: 1px solid #e9e8e3; }
+.topic-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; min-height: 56px; padding: 12px 4px; }
+.topic-list .link { flex: 1; font-size: 16px; }
+.topic-list li > span { color: #aaa79f; font-size: 11px; }
 .link, .back { border: 0 !important; padding: 0 !important; color: #37352f !important; background: transparent !important; font-size: 15px; text-align: left; }
 .link:hover { color: #64866e !important; text-decoration: underline; }
 .topic-list .link { font-weight: 550; }
 
 .editor-page .back { margin-bottom: 20px; color: #aaa79f !important; font-size: 13px; }
-.editor-page { width: min(100%, 880px); }
+.editor-page { width: min(100%, 920px); }
 .topic-title-editor { display: flex; align-items: center; gap: 8px; }
 .topic-title-editor input { flex: 1; padding: 0; border: 0; color: #2f2e2b; background: transparent; font: inherit; font-size: 34px; font-weight: 650; letter-spacing: -.035em; }
 .topic-title-editor input:focus { outline: 0; box-shadow: inset 0 -1px #9ab7a0; }
@@ -167,7 +183,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .tool-content h3 { margin-top: 15px; }
 .tool-content .rows { margin-top: 12px; }
 .tool-content .notice { margin-left: 0; width: 100%; }
-.settings-page { max-width: 780px; }
+.settings-page { width: min(100%, 920px); max-width: none; }
 .settings-page form { max-width: 760px; }
 .settings-page .section-label { margin-top: 35px; }
 .account-setup { display: block; padding: 14px; border: 1px solid #ebeae5; border-radius: 9px; background: #fcfcfa; }
@@ -241,6 +257,9 @@ a:hover { color: #3f674a; }
   .variant-tabs { display: flex; max-height: none; overflow-x: auto; padding-bottom: 3px; }
   .variant-tab { flex: 0 0 170px; }
   .rows li { align-items: stretch; flex-direction: column; }
+  .topic-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+  .topic-list li > span { grid-column: 1; }
+  .topic-list .icon-button { grid-column: 2; grid-row: 1 / 3; }
   .draft-editor { min-height: 220px; font-size: 15px; line-height: 1.6; }
   .variant-card { padding: 16px 14px 14px; }
   .variant-header { flex-direction: column; gap: 5px; }

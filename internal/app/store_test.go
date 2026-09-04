@@ -461,7 +461,7 @@ func TestDeleteMediaAndUnpublishedVariantRemoveLocalFiles(t *testing.T) {
 	}
 }
 
-func TestDeleteVariantPreservesPublicationHistory(t *testing.T) {
+func TestDeleteVariantRemovesLocalPublicationHistory(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, t.TempDir())
 	if err != nil {
@@ -475,11 +475,90 @@ func TestDeleteVariantPreservesPublicationHistory(t *testing.T) {
 	if _, err = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "published"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = store.DeleteVariant(ctx, variant.ID); err == nil {
-		t.Fatal("variant with publication history must not be deleted")
+	if err = store.DeleteVariant(ctx, variant.ID); err != nil {
+		t.Fatalf("local published variant should be removable: %v", err)
+	}
+	if _, err = store.GetVariant(ctx, variant.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("variant was not removed: %v", err)
+	}
+	if rows, err := store.ListPublications(ctx); err != nil || len(rows) != 0 {
+		t.Fatalf("local publication history remains: %v %v", rows, err)
+	}
+}
+
+func TestDeleteVariantPreservesUnresolvedPublication(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	publication, _ := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "needs_confirmation"})
+	if err = store.DeleteVariant(ctx, variant.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unresolved variant deletion error=%v", err)
 	}
 	if _, err = store.GetVariant(ctx, variant.ID); err != nil {
-		t.Fatalf("historical variant was removed: %v", err)
+		t.Fatalf("variant removed despite unresolved publication: %v", err)
+	}
+	rows, err := store.ListPublications(ctx)
+	if err != nil || len(rows) != 1 || rows[0].ID != publication.ID {
+		t.Fatalf("unresolved publication changed: %v %v", rows, err)
+	}
+}
+
+func TestDeletePublicationOnlyAllowsTerminalStatuses(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	pending, _ := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "publishing"})
+	if err = store.DeletePublication(ctx, pending.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("pending deletion error=%v", err)
+	}
+	terminal, _ := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "failed"})
+	if err = store.DeletePublication(ctx, terminal.ID); err != nil {
+		t.Fatalf("terminal deletion: %v", err)
+	}
+}
+
+func TestDeleteDisabledAccountRemovesLocalGraph(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "t"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	if _, err = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "published"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DeactivateAccount(ctx, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DeleteAccountPermanently(ctx, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.GetAccount(ctx, account.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("account remains: %v", err)
+	}
+	if _, err = store.GetVariant(ctx, variant.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("variant remains: %v", err)
+	}
+	if rows, err := store.ListPublications(ctx); err != nil || len(rows) != 0 {
+		t.Fatalf("publication remains: %v %v", rows, err)
 	}
 }
 

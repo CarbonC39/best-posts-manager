@@ -350,6 +350,24 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, v)
 		}
 		return
+	case strings.HasPrefix(path, "publications/") && r.Method == http.MethodDelete:
+		publicationID := strings.TrimPrefix(path, "publications/")
+		if publicationID == "" || strings.Contains(publicationID, "/") {
+			fail(w, http.StatusNotFound, app.ErrNotFound)
+			return
+		}
+		if e := s.Svc.DeletePublication(ctx, publicationID); e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "remote": "untouched"})
+		}
+		return
 	case strings.HasPrefix(path, "publications/") && strings.HasSuffix(path, "/cancel"):
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
@@ -631,6 +649,25 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		account, err := s.Svc.DeactivateAccount(ctx, aid)
 		if err != nil {
 			fail(w, 400, err)
+		} else {
+			writeJSON(w, http.StatusOK, account)
+		}
+		return
+	case strings.HasPrefix(path, "accounts/") && r.Method == http.MethodDelete:
+		aid := strings.TrimPrefix(path, "accounts/")
+		if aid == "" || strings.Contains(aid, "/") {
+			fail(w, http.StatusNotFound, app.ErrNotFound)
+			return
+		}
+		account, err := s.Svc.DeleteAccountPermanently(ctx, aid)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(err, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, err)
 		} else {
 			writeJSON(w, http.StatusOK, account)
 		}

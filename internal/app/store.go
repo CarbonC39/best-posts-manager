@@ -956,8 +956,8 @@ func (s *Store) DeleteMedia(ctx context.Context, mediaID string) error {
 	return nil
 }
 
-// DeleteVariant removes an unpublished variant, its local media, and translation
-// records that refer to it. Publication history prevents deletion.
+// DeleteVariant removes the local version and every local publication record
+// attached to it. It never contacts the remote platform; remote posts remain.
 func (s *Store) DeleteVariant(ctx context.Context, variantID string) error {
 	var path string
 	if err := s.DB.QueryRowContext(ctx, `SELECT id FROM variants WHERE id=?`, variantID).Scan(new(string)); err != nil {
@@ -965,13 +965,6 @@ func (s *Store) DeleteVariant(ctx context.Context, variantID string) error {
 			return ErrNotFound
 		}
 		return err
-	}
-	var publications int
-	if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM publications WHERE variant_id=?`, variantID).Scan(&publications); err != nil {
-		return err
-	}
-	if publications > 0 {
-		return fmt.Errorf("%w: variant has publication history and cannot be deleted; copy it to a new version instead", ErrConflict)
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT path FROM media WHERE variant_id=?`, variantID)
 	if err != nil {
@@ -1007,7 +1000,18 @@ func (s *Store) DeleteVariant(ctx context.Context, variantID string) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	var unresolved int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM publications WHERE variant_id=? AND status IN ('pending','publishing','needs_confirmation')`, variantID).Scan(&unresolved); err != nil {
+		return err
+	}
+	if unresolved > 0 {
+		return fmt.Errorf("%w: variant has an unresolved publication; confirm or cancel it first", ErrConflict)
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM translations WHERE source_variant_id=? OR target_variant_id=?`, variantID, variantID); err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM publications WHERE variant_id=?`, variantID)
+	}
+	if err == nil {
 		_, err = tx.ExecContext(ctx, `DELETE FROM media WHERE variant_id=?`, variantID)
 	}
 	if err == nil {
@@ -1033,6 +1037,121 @@ func (s *Store) DeleteVariant(ctx context.Context, variantID string) error {
 		}
 	}
 	return nil
+}
+
+// DeletePublication removes only the local history row. The remote post is
+// deliberately untouched and cannot be inferred from this operation.
+func (s *Store) DeletePublication(ctx context.Context, publicationID string) error {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM publications WHERE id=? AND status IN ('published','failed','cancelled')`, publicationID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		var status string
+		if err = s.DB.QueryRowContext(ctx, `SELECT status FROM publications WHERE id=?`, publicationID).Scan(&status); err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: active publication cannot be removed while its outcome is unresolved", ErrConflict)
+	}
+	return nil
+}
+
+// DeleteAccountPermanently transactionally removes all local records owned by
+// an account while preserving profile/topic data and remote content.
+func (s *Store) DeleteAccountPermanently(ctx context.Context, accountID string) (Account, error) {
+	a, err := s.GetAccount(ctx, accountID)
+	if err != nil {
+		return Account{}, err
+	}
+	if !a.Disabled {
+		return Account{}, fmt.Errorf("%w: disable the account before permanently deleting it", ErrConflict)
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT path FROM media WHERE variant_id IN (SELECT id FROM variants WHERE account_id=?)`, accountID)
+	if err != nil {
+		return Account{}, err
+	}
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err = rows.Scan(&path); err != nil {
+			rows.Close()
+			return Account{}, err
+		}
+		if filepath.Dir(path) != s.MediaDir || filepath.Base(path) == "." {
+			rows.Close()
+			return Account{}, errors.New("media path is outside the local media directory")
+		}
+		if info, statErr := os.Lstat(path); statErr != nil && !os.IsNotExist(statErr) {
+			rows.Close()
+			return Account{}, statErr
+		} else if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			rows.Close()
+			return Account{}, errors.New("refusing to delete symlink media")
+		}
+		paths = append(paths, path)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return Account{}, err
+	}
+	if err = rows.Close(); err != nil {
+		return Account{}, err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Account{}, err
+	}
+	defer tx.Rollback()
+	variantQuery := `(SELECT id FROM variants WHERE account_id=?)`
+	if _, err = tx.ExecContext(ctx, `DELETE FROM translations WHERE source_variant_id IN `+variantQuery+` OR target_variant_id IN `+variantQuery+` OR target_account_id=?`, accountID, accountID, accountID); err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM publications WHERE account_id=? OR variant_id IN `+variantQuery, accountID, accountID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM external_posts WHERE account_id=?`, accountID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM media WHERE variant_id IN `+variantQuery, accountID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM variants WHERE account_id=?`, accountID)
+	}
+	if err == nil {
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, `DELETE FROM accounts WHERE id=? AND disabled=1`, accountID)
+		if err == nil {
+			var affected int64
+			affected, err = result.RowsAffected()
+			if err == nil && affected != 1 {
+				err = fmt.Errorf("%w: account must remain disabled while it is deleted", ErrConflict)
+			}
+		}
+	}
+	if err != nil {
+		return Account{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Account{}, err
+	}
+	for _, path := range paths {
+		var remaining int
+		if err = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM media WHERE path=?`, path).Scan(&remaining); err != nil {
+			return Account{}, fmt.Errorf("account deleted but shared-file check failed: %w", err)
+		}
+		if remaining == 0 {
+			if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return Account{}, fmt.Errorf("account deleted but local media cleanup failed: %w", err)
+			}
+		}
+	}
+	a.Disabled = true
+	return a, nil
 }
 func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publication, error) {
 	if p.ID == "" {
