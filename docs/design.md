@@ -95,7 +95,7 @@ X、微博、小红书和 QQ 空间无法依赖稳定的公开发布 API 时，�
 
 节点 3 实现 `bridge/v1`：管理端通过 `/api/bridge/pairings` 生成十分钟有效的一次性 code；平台页脚本以 code 调用 `hello` 后，本地服务才签发 90 天 bearer。脚本端随后只在 `Authorization` header 发送 bearer，并以 `request_id` 关联 `fill`、`capture`、`filled`、`result`、`error` 消息。请求最多 1 MiB、文本 32 KiB、媒体元数据 16 项；请求 15 分钟过期。配对 code 只能 hello 使用一次；明文 token 按平台放在油猴隔离存储，不放站点 localStorage，服务端在 SQLite 中只持久化哈希和有效期，因此页面刷新和本地程序重启都不要求重新输入 code。重新配对会轮换该平台 token，撤销立即拒绝；相同 result 重放幂等，冲突结果拒绝。所有消息校验平台、当前页面 host 和可选 Origin，token/code 不进 URL 或日志，明文 token 不进 SQLite。
 
-本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持脚本管理器检查更新。HTTP 路由访问日志默认关闭，可由 `BPM_HTTP_LOG=1` 或 `serve --http-log` 显式开启；开启时只记录 method、path、status 和耗时，不记录 query 或 body。启动日志以及连接/Bluesky 诊断阶段日志始终保留且只含脱敏元数据。WebUI 显示配对的当前 page URL、最后心跳、有效/撤销状态和最近请求状态；“已连接”要求最近 30 秒内有心跳，避免把已关闭的平台页显示为在线。已连接配对创建 fill/capture 时可省略 page URL，服务端使用内存中的已校验页面，而脚本每次请求仍提交并校验实际当前页面。
+本地服务通过 `/userscript/bpm-bridge.user.js` 提供可安装脚本，并在响应时按当前回环 host/port 生成 `downloadURL` 与 `updateURL`，避免从 WebUI 链接到 `file:///`，也支持脚本管理器检查更新。WebUI 使用 `/topics`、`/topics/:id`、`/history`、`/settings` 历史 URL，可直接刷新或复制链接；服务端对这些 GET/HEAD 路径提供 SPA fallback。HTTP 路由访问日志默认关闭，可由 `BPM_HTTP_LOG=1` 或 `serve --http-log` 显式开启；开启时只记录 method、path、status 和耗时，不记录 query 或 body。启动日志以及连接/Bluesky 诊断阶段日志始终保留且只含脱敏元数据。WebUI 显示配对的当前 page URL、最后心跳、有效/撤销状态和最近请求状态；“已连接”要求最近 30 秒内有心跳，避免把已关闭的平台页显示为在线。已连接配对创建 fill/capture 时可省略 page URL，服务端使用内存中的已校验页面，而脚本每次请求仍提交并校验实际当前页面。
 
 管理端创建 fill/capture 请求；脚本端使用 `/bridge/v1/requests` 轮询并回传。fill 直接建立 `needs_confirmation` Publication：默认只填充；用户对当前 X 纯文本请求明确选择自动发布时，请求带 `auto_publish=true`，脚本才尝试点击已知、可见且启用的发布按钮，选择器不匹配就停止并提示。网页的媒体上传完成状态无法稳定跨平台判断，因此带媒体的自动发布请求会退回人工检查和发布。无论是否自动点击，用户都应核对平台结果；可在脚本或发布历史中填入帖子永久链接确认成功，也可明确确认未发布。超时不提供盲重试。capture 只保存脚本从当前可见 DOM 读到的快照，并记录 incomplete/reason。脚本不调用隐藏 API。
 
@@ -154,7 +154,7 @@ CLI 覆盖同样的核心工作流，例如列出/创建 Topic、编辑或导入
 
 ### 本地凭据与自动连接
 
-`credential.Store` 是小型可替换接口；默认实现把随机引用到 secret 的映射放在数据目录 `credentials.json`，目录 0700、文件 0600，写入使用临时文件原子替换并拒绝 symlink/过宽权限。SQLite 只保存 `credential_ref`，普通 API、日志、CLI 和备份不返回 secret。Mastodon/Misskey 发布优先解析引用，空引用时兼容读取 `token_env`；Bluesky 的 app password 同样只在创建会话时使用，session JWT 不落盘。测试可注入内存 Store。
+`credential.Store` 是小型可替换接口；默认实现把随机引用到 secret 的映射放在数据目录 `credentials.json`，目录 0700、文件 0600，写入使用临时文件原子替换并拒绝 symlink/过宽权限。SQLite 只保存 `credential_ref`，普通 API、日志、CLI 和备份不返回 secret。手动账号可直接写入本地 secret，也可使用 `token_env` fallback；已有账号编辑采用“写新 secret→一次性原子替换引用→删除旧 ref”，失败时旧凭据保持可用。Mastodon/Misskey 发布优先解析引用，空引用时兼容读取 `token_env`；Bluesky 的 app password 同样只在创建会话时使用，session JWT 不落盘。Bluesky PDS 统一规范化为空值默认 `https://bsky.social`、裸域名补 HTTPS、去尾斜杠，并拒绝路径/query/userinfo。测试可注入内存 Store。
 
 连接管理器只在进程内保存短期 OAuth state/client secret 或 MiAuth session，默认十分钟过期且一次性消费。Mastodon start 注册本地应用，优先发现 granular `write:statuses write:media`，否则注册与授权都使用高层 `write`；callback 仅接受回环 Host 并以固定相对地址回跳，失败清理临时凭据。Misskey 使用官方 `/miauth/{session}` 和 `/api/miauth/{session}/check`，权限为 `write:notes,write:drive`。这两个流程只创建单用户本地 Account，不共享账号或引入通用 OAuth 框架。
 

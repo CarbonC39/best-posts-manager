@@ -3,17 +3,47 @@ package main
 import (
 	"encoding/json"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestEmbeddedFrontendIsPresent(t *testing.T) {
 	data, err := fs.ReadFile(web, "dist/index.html")
 	if err != nil || len(data) == 0 {
 		t.Fatalf("embedded frontend missing: %v", err)
+	}
+}
+
+func TestWebHandlerServesHistoryRoutesAndKeepsAssetsStrict(t *testing.T) {
+	handler, err := newWebHandler(fstest.MapFS{
+		"index.html":    {Data: []byte("<main>app shell</main>")},
+		"assets/app.js": {Data: []byte("console.log('asset')")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/topics", "/topics/topic-1", "/history", "/settings"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil))
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "app shell") {
+			t.Fatalf("GET %s: status=%d body=%q", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://localhost/assets/app.js", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "asset") {
+		t.Fatalf("asset: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "http://localhost/settings", nil))
+	if recorder.Code == http.StatusOK || strings.Contains(recorder.Body.String(), "app shell") {
+		t.Fatalf("POST /settings unexpectedly received SPA fallback: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
 

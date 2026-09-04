@@ -319,6 +319,9 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.Name == "" || !supportedPlatform(a.Platform) {
 		return a, fmt.Errorf("a name and supported platform are required")
 	}
+	if a.CredentialRef == "" && a.TokenEnv != "" && !credentialEnvName.MatchString(a.TokenEnv) {
+		return a, errors.New("token_env must be an environment variable name")
+	}
 	if a.RemoteID != "" {
 		var existingID string
 		var disabled int
@@ -391,6 +394,37 @@ func (s *Store) GetAccount(ctx context.Context, aid string) (Account, error) {
 	a.CreatedAt = parseTime(t)
 	a.Disabled = disabled != 0
 	return a, e
+}
+
+// UpdateAccountConnection atomically updates editable metadata and the
+// credential reference. Profile and platform are immutable account identity.
+func (s *Store) UpdateAccountConnection(ctx context.Context, a Account, tokenEnv, credentialRef string) (Account, error) {
+	current, err := s.GetAccount(ctx, a.ID)
+	if err != nil {
+		return Account{}, err
+	}
+	a.Name = strings.TrimSpace(a.Name)
+	if a.Name == "" || !supportedPlatform(current.Platform) {
+		return Account{}, errors.New("a name and supported platform are required")
+	}
+	if tokenEnv != "" && !credentialEnvName.MatchString(tokenEnv) {
+		return Account{}, errors.New("token_env must be an environment variable name")
+	}
+	if a.RemoteID != "" {
+		var other string
+		err = s.DB.QueryRowContext(ctx, `SELECT id FROM accounts WHERE profile_id=? AND platform=? AND remote_id=? AND id<>? AND disabled=0`, current.ProfileID, current.Platform, a.RemoteID, a.ID).Scan(&other)
+		if err == nil {
+			return Account{}, fmt.Errorf("%w: this platform account is already connected", ErrConflict)
+		}
+		if err != sql.ErrNoRows {
+			return Account{}, err
+		}
+	}
+	_, err = s.DB.ExecContext(ctx, `UPDATE accounts SET name=?,remote_id=?,base_url=?,token_env=?,credential_ref=? WHERE id=?`, a.Name, a.RemoteID, a.BaseURL, tokenEnv, credentialRef, a.ID)
+	if err != nil {
+		return Account{}, err
+	}
+	return s.GetAccount(ctx, a.ID)
 }
 
 // DeactivateAccount preserves all foreign-key history while preventing future use.

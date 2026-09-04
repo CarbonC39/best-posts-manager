@@ -10,14 +10,16 @@ type Profile struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 type Account struct {
-	ID            string    `json:"id"`
-	ProfileID     string    `json:"profile_id"`
-	Platform      string    `json:"platform"`
-	Name          string    `json:"name"`
-	RemoteID      string    `json:"remote_id"`
-	BaseURL       string    `json:"base_url"`
-	TokenEnv      string    `json:"token_env"`
-	CredentialRef string    `json:"credential_ref"`
+	ID        string `json:"id"`
+	ProfileID string `json:"profile_id"`
+	Platform  string `json:"platform"`
+	Name      string `json:"name"`
+	RemoteID  string `json:"remote_id"`
+	BaseURL   string `json:"base_url"`
+	TokenEnv  string `json:"token_env"`
+	// CredentialRef is an internal pointer into the local credential store. It
+	// must never cross the HTTP/CLI JSON boundary.
+	CredentialRef string    `json:"-"`
 	Disabled      bool      `json:"disabled"`
 	CreatedAt     time.Time `json:"created_at"`
 }
@@ -115,7 +117,7 @@ type TranslationConfig struct {
 	Location      string    `json:"location"`
 	TokenEnv      string    `json:"token_env"`
 	KeyEnv        string    `json:"key_env"`
-	CredentialRef string    `json:"credential_ref"`
+	CredentialRef string    `json:"-"`
 	Model         string    `json:"model"`
 	CreatedAt     time.Time `json:"created_at"`
 }

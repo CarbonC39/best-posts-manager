@@ -40,6 +40,14 @@ type responseLogger struct {
 	status int
 }
 
+func apiBridgePlatform(platform string) bool {
+	switch platform {
+	case "x", "weibo", "xiaohongshu", "qzone":
+		return true
+	}
+	return false
+}
+
 func (w *responseLogger) WriteHeader(status int) {
 	if w.status != 0 {
 		return
@@ -172,14 +180,25 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodPost {
-			var v app.Account
-			if e := decode(r, &v); e != nil {
+			var req struct {
+				app.Account
+				Secret string `json:"secret"`
+			}
+			if e := decode(r, &req); e != nil {
 				fail(w, 400, e)
 				return
 			}
-			// Credential references are assigned only by the local authorization flow.
-			v.CredentialRef = ""
-			v, e := s.Svc.Store.CreateAccount(ctx, v)
+			// A manual secret is written to the local credential store by the
+			// service. Neither the secret nor its internal reference is returned.
+			if strings.TrimSpace(req.Secret) != "" && strings.TrimSpace(req.TokenEnv) != "" {
+				fail(w, http.StatusBadRequest, errors.New("choose either a saved credential or an environment variable, not both"))
+				return
+			}
+			if req.Secret == "" && req.TokenEnv == "" && !apiBridgePlatform(req.Platform) {
+				fail(w, http.StatusBadRequest, errors.New("enter an access token/app password or an environment variable name"))
+				return
+			}
+			v, e := s.Svc.CreateAccount(ctx, req.Account, req.Secret)
 			if e != nil {
 				status := 400
 				if errors.Is(e, app.ErrNotFound) {
@@ -528,6 +547,39 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fail(w, http.StatusBadRequest, fmt.Errorf("connection diagnostics are not supported for %s", account.Platform))
+		return
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/connection") && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
+		aid := strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/connection")
+		current, e := s.Svc.Store.GetAccount(ctx, aid)
+		if e != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
+			return
+		}
+		var req struct {
+			Name     string `json:"name"`
+			RemoteID string `json:"remote_id"`
+			BaseURL  string `json:"base_url"`
+			Secret   string `json:"secret"`
+			TokenEnv string `json:"token_env"`
+		}
+		if e = decode(r, &req); e != nil {
+			fail(w, http.StatusBadRequest, e)
+			return
+		}
+		updated, e := s.Svc.UpdateAccount(ctx, app.Account{ID: current.ID, ProfileID: current.ProfileID, Platform: current.Platform, Name: req.Name, RemoteID: req.RemoteID, BaseURL: req.BaseURL}, req.Secret, req.TokenEnv)
+		if e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, updated)
+		}
 		return
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/capability") && r.Method == http.MethodGet:
 		aid := strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/capability")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"best-post-manager/internal/app"
 	"best-post-manager/internal/backup"
@@ -177,10 +179,29 @@ func serve(svc *service.Service, args []string) {
 		fatal(fmt.Errorf("embedded userscript: %w", err))
 	}
 	log.Printf("startup address=http://%s http_request_log=%s", *addr, enabledLabel(*httpLog))
-	staticHandler := http.FileServer(http.FS(static))
-	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: staticHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials), LogRequests: *httpLog}); e != nil {
+	webHandler, err := newWebHandler(static)
+	if err != nil {
+		fatal(fmt.Errorf("embedded web index: %w", err))
+	}
+	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: webHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials), LogRequests: *httpLog}); e != nil {
 		fatal(e)
 	}
+}
+
+func newWebHandler(static fs.FS) (http.Handler, error) {
+	indexHTML, err := fs.ReadFile(static, "index.html")
+	if err != nil {
+		return nil, err
+	}
+	staticHandler := http.FileServer(http.FS(static))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && (r.URL.Path == "/" || r.URL.Path == "/topics" || strings.HasPrefix(r.URL.Path, "/topics/") || r.URL.Path == "/history" || r.URL.Path == "/settings") {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(indexHTML))
+			return
+		}
+		staticHandler.ServeHTTP(w, r)
+	}), nil
 }
 
 func envHTTPLog() bool {

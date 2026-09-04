@@ -84,6 +84,9 @@
 - [x] 本地权限受限 credential Store、v6 migration，以及 Account/TranslationConfig 的引用优先、环境变量 fallback。
 - [x] 设置页动态平台/provider 说明；Mastodon OAuth granular-scope discovery/旧实例 fallback；Misskey MiAuth；过期、重放和失败清理测试。
 - [x] Bluesky 手动账号添加后执行只读连接诊断；设置页可按账号重试，并按配置/网络/鉴权/协议阶段显示脱敏错误和建议。
+- [x] Bluesky PDS 统一规范化（默认 `https://bsky.social`、裸域名和尾斜杠），补充 session/createRecord 回归测试。
+- [x] 手动账号支持本地保存和更新 access token/app password；编辑账号时可修改名称、实例/PDS、远端身份，空 secret 保持现有凭据。
+- [x] WebUI 提供 `/topics`、`/topics/:id`、`/history`、`/settings` 可刷新/复制的历史 URL，并由服务端为 GET/HEAD 路由提供 fallback。
 - [x] Mastodon-compatible 手动/OAuth 账号提供只读实例、身份和发帖/媒体端点诊断；OAuth 在支持 granular scope 时请求 `read:accounts`，权限探测明确不冒充 scope 证明。
 - [x] 非官方 `google-gtx` provider（本地 5000 Unicode 字符校验、分段响应、fake-server 测试）；真实 provider/真实账号仍只做手工验收。
 - [x] 将 OAuth/MiAuth 合并到平台账号表单，补齐手动添加反馈与账号列表；从同源 WebUI 安装/更新用户脚本，并增加不记录 query/body/secret 的请求与连接阶段日志。

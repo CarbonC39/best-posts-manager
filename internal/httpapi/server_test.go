@@ -13,6 +13,7 @@ import (
 
 	"best-post-manager/internal/app"
 	"best-post-manager/internal/connection"
+	"best-post-manager/internal/credential"
 	"best-post-manager/internal/service"
 )
 
@@ -90,6 +91,89 @@ func TestJSONCoreChain(t *testing.T) {
 	}
 	if got.ID != v.ID {
 		t.Fatalf("variant response id lost: %+v", got)
+	}
+}
+
+func TestManualAccountSecretIsStoredLocallyAndCanBeReplaced(t *testing.T) {
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	svc := service.New(st)
+	server := httptest.NewServer(&Server{Svc: svc})
+	defer server.Close()
+	postJSON := func(method, path string, value any) (*http.Response, map[string]any) {
+		raw, _ := json.Marshal(value)
+		req, _ := http.NewRequest(method, server.URL+path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		res, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(res.Body).Decode(&body)
+		res.Body.Close()
+		return res, body
+	}
+	_, profile := postJSON(http.MethodPost, "/api/profiles", map[string]any{"name": "p"})
+	res, account := postJSON(http.MethodPost, "/api/accounts", map[string]any{"profile_id": profile["id"], "platform": "bluesky", "name": "b", "remote_id": "me.test", "secret": "first-secret"})
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d body=%v", res.StatusCode, account)
+	}
+	if _, ok := account["secret"]; ok {
+		t.Fatal("secret returned in account JSON")
+	}
+	if _, ok := account["credential_ref"]; ok {
+		t.Fatal("credential ref returned in account JSON")
+	}
+	id := account["id"].(string)
+	a, err := svc.Store.GetAccount(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.CredentialRef == "" {
+		t.Fatal("managed credential ref was not assigned")
+	}
+	if got, err := svc.Credentials.Get(a.CredentialRef); err != nil || got != "first-secret" {
+		t.Fatalf("stored secret=%q err=%v", got, err)
+	}
+	res, _ = postJSON(http.MethodPut, "/api/accounts/"+id+"/connection", map[string]any{"name": "b2", "remote_id": "me.test", "base_url": "", "secret": "second-secret"})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("update status=%d", res.StatusCode)
+	}
+	updated, err := svc.Store.GetAccount(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := svc.Credentials.Get(updated.CredentialRef); err != nil || got != "second-secret" {
+		t.Fatalf("replacement secret=%q err=%v", got, err)
+	}
+	if _, err := svc.Credentials.Get(a.CredentialRef); err == nil {
+		t.Fatal("old credential was not deleted")
+	}
+	secondRef := updated.CredentialRef
+	res, _ = postJSON(http.MethodPut, "/api/accounts/"+id+"/connection", map[string]any{"name": "renamed only", "remote_id": "me.test", "base_url": "bsky.social/"})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("metadata-only update status=%d", res.StatusCode)
+	}
+	updated, err = svc.Store.GetAccount(ctx, id)
+	if err != nil || updated.Name != "renamed only" || updated.BaseURL != "https://bsky.social" || updated.CredentialRef != secondRef {
+		t.Fatalf("metadata-only update changed connection unexpectedly: account=%+v err=%v", updated, err)
+	}
+	if got, getErr := svc.Credentials.Get(secondRef); getErr != nil || got != "second-secret" {
+		t.Fatalf("metadata-only update lost secret=%q err=%v", got, getErr)
+	}
+	res, body := postJSON(http.MethodPut, "/api/accounts/"+id+"/connection", map[string]any{"name": "ambiguous", "remote_id": "me.test", "base_url": "https://bsky.social", "secret": "third-secret", "token_env": "BSKY_PASSWORD"})
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(fmt.Sprint(body["error"]), "either") {
+		t.Fatalf("ambiguous credential update status=%d body=%v", res.StatusCode, body)
+	}
+	if after, getErr := svc.Store.GetAccount(ctx, id); getErr != nil || after.CredentialRef != secondRef || after.Name != "renamed only" {
+		t.Fatalf("ambiguous update mutated account: account=%+v err=%v", after, getErr)
+	}
+	if _, err := credential.NewFileStore(st.DataDir); err != nil {
+		t.Fatal(err)
 	}
 }
 

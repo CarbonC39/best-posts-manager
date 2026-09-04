@@ -82,11 +82,11 @@ Go 支持的平台可以通过 `GOOS`、`GOARCH` 交叉编译；Windows 目标�
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o build/bpm.exe ./cmd/bpm
 ```
 
-Mastodon-compatible Account 手动配置时只保存 token 环境变量名，不把 token 写入 SQLite；发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。设置页也提供 Mastodon OAuth 和 Misskey MiAuth 自动连接：授权回调只在回环服务上接收，access token 写入数据目录下权限受限的 `credentials.json`，SQLite/API/备份只保存不透明引用。该文件不应加入版本库或手工备份。
+Mastodon-compatible Account 手动配置可以把 token 保存到数据目录下权限受限的 `credentials.json`，也可以只保存环境变量名而不保存 token；环境变量模式下，发布前设置该变量，例如 `export BPM_MASTODON_TOKEN=...`，再将 `BPM_MASTODON_TOKEN` 作为 Account 的 `token_env`。设置页也提供 Mastodon OAuth 和 Misskey MiAuth 自动连接：授权回调只在回环服务上接收，access token 同样写入 `credentials.json`，SQLite/API/备份只保存不透明引用。该文件不应加入版本库或手工备份。
 
-OAuth 连接要求通过回环地址打开 WebUI。Mastodon 会先发现实例是否支持 `write:statuses`/`write:media`，旧实例回退到兼容的 `write` scope；Misskey 请求 `write:notes,write:drive`。OAuth state、MiAuth session 和 client secret 只保存在进程内短期状态，失败或过期不会创建半成账号。若不使用自动连接，仍可按下文用环境变量配置。
+OAuth 连接要求通过回环地址打开 WebUI。Mastodon 会先发现实例是否支持 `write:statuses`/`write:media`，旧实例回退到兼容的 `write` scope；Misskey 请求 `write:notes,write:drive`。OAuth state、MiAuth session 和 client secret 只保存在进程内短期状态，失败或过期不会创建半成账号。若不使用自动连接，可直接保存 token，也可按下文使用环境变量。
 
-手动添加账号时仍只保存环境变量名：Misskey 的 `token_env` 指向 access token，`base_url` 是实例地址；Bluesky 的 `remote_id` 是 handle/identifier，`base_url` 是 PDS 地址，`token_env` 指向 app password。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：
+手动添加账号支持直接填写 access token/app password（推荐，保存在数据目录权限受限的 `credentials.json`）或只保存环境变量名；secret 不进入 SQLite、API 响应或日志。已有账号可以编辑名称、实例/PDS、远端身份和凭据，凭据留空表示保持当前值。Bluesky 的 `remote_id` 是 handle/identifier，PDS 为空时默认规范化为 `https://bsky.social`，也接受裸域名和尾斜杠。Bluesky 会话 JWT 仅在内存请求期间使用，不写入数据库。示例：
 
 Bluesky 手动账号添加后会自动执行一次只读连接测试，也可以在设置中的账号卡片展开“Bluesky 连接诊断”并重新测试。测试只调用 `com.atproto.server.createSession`，不会发帖；界面会区分配置、网络、鉴权和协议阶段，并给出下一步建议。返回内容和 bpm 日志都不会包含 app password、JWT 或完整远端响应。
 

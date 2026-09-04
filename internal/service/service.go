@@ -65,6 +65,120 @@ func New(s *app.Store) *Service {
 	return &Service{Store: s, Mastodon: mastodon, Misskey: misskey, Bluesky: bluesky, Credentials: secrets}
 }
 
+// CreateAccount stores a manual secret in the local credential store before
+// exposing the account row. Secrets never enter SQLite or an API response.
+func (s *Service) CreateAccount(ctx context.Context, a app.Account, secret string) (app.Account, error) {
+	secret = strings.TrimSpace(secret)
+	a.TokenEnv = strings.TrimSpace(a.TokenEnv)
+	// Managed references are minted here; callers cannot attach an arbitrary
+	// existing secret by supplying an internal reference.
+	a.CredentialRef = ""
+	if secret != "" && a.TokenEnv != "" {
+		return app.Account{}, errors.New("choose either a saved credential or an environment variable, not both")
+	}
+	if a.Platform == "bluesky" {
+		base, err := platform.NormalizePDSURL(a.BaseURL)
+		if err != nil {
+			return app.Account{}, err
+		}
+		a.BaseURL = base
+	}
+	var oldRef string
+	if a.RemoteID != "" {
+		if existing, err := s.Store.ListAccounts(ctx, a.ProfileID); err == nil {
+			for _, candidate := range existing {
+				if candidate.Platform == a.Platform && candidate.RemoteID == a.RemoteID && candidate.Disabled {
+					oldRef = candidate.CredentialRef
+					break
+				}
+			}
+		}
+	}
+	newRef := ""
+	if secret != "" {
+		if s.Credentials == nil {
+			return app.Account{}, errors.New("local credential store is unavailable")
+		}
+		var err error
+		newRef, err = credential.NewRef()
+		if err != nil {
+			return app.Account{}, err
+		}
+		if err = s.Credentials.Set(newRef, secret); err != nil {
+			return app.Account{}, err
+		}
+		a.CredentialRef, a.TokenEnv = newRef, ""
+	}
+	created, err := s.Store.CreateAccount(ctx, a)
+	if err != nil {
+		if newRef != "" && s.Credentials != nil {
+			_ = s.Credentials.Delete(newRef)
+		}
+		return app.Account{}, err
+	}
+	if oldRef != "" && oldRef != created.CredentialRef && s.Credentials != nil {
+		_ = s.Credentials.Delete(oldRef)
+	}
+	return created, nil
+}
+
+// UpdateAccount changes metadata and optionally replaces the account secret.
+// The replacement is written first; a failed database update cleans it up and
+// leaves the previous reference untouched.
+func (s *Service) UpdateAccount(ctx context.Context, a app.Account, secret, tokenEnv string) (app.Account, error) {
+	old, err := s.Store.GetAccount(ctx, a.ID)
+	if err != nil {
+		return app.Account{}, err
+	}
+	a.Platform, a.ProfileID = old.Platform, old.ProfileID
+	if old.Platform == "bluesky" {
+		a.BaseURL, err = platform.NormalizePDSURL(a.BaseURL)
+		if err != nil {
+			return app.Account{}, err
+		}
+	}
+	secret = strings.TrimSpace(secret)
+	tokenEnv = strings.TrimSpace(tokenEnv)
+	if secret != "" && tokenEnv != "" {
+		return app.Account{}, errors.New("choose either a saved credential or an environment variable, not both")
+	}
+	newRef := ""
+	credentialRef := old.CredentialRef
+	if secret != "" {
+		if s.Credentials == nil {
+			return app.Account{}, errors.New("local credential store is unavailable")
+		}
+		newRef, err = credential.NewRef()
+		if err == nil {
+			err = s.Credentials.Set(newRef, secret)
+		}
+		if err != nil {
+			return app.Account{}, err
+		}
+		tokenEnv = ""
+	} else if tokenEnv == "" {
+		tokenEnv = old.TokenEnv
+	} else if tokenEnv != old.TokenEnv {
+		credentialRef = ""
+	}
+	if newRef != "" {
+		credentialRef = newRef
+	}
+	updated, err := s.Store.UpdateAccountConnection(ctx, a, tokenEnv, credentialRef)
+	if err != nil {
+		if newRef != "" && s.Credentials != nil {
+			_ = s.Credentials.Delete(newRef)
+		}
+		return app.Account{}, err
+	}
+	if secret != "" || tokenEnv != old.TokenEnv {
+		if old.CredentialRef != "" && s.Credentials != nil {
+			_ = s.Credentials.Delete(old.CredentialRef)
+		}
+	}
+	return updated, nil
+}
+
 type TranslationRequest struct {
 	SourceVariantID string
 	TargetAccountID string

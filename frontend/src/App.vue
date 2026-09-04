@@ -5,7 +5,7 @@ import { canAutoPublish } from './bridgeAdapters'
 import PublicationList from './PublicationList.vue'
 
 type Profile = { id: string; name: string }
-type Account = { id: string; profile_id: string; platform: string; name: string; remote_id: string; base_url?: string; credential_ref?: string; disabled?: boolean }
+type Account = { id: string; profile_id: string; platform: string; name: string; remote_id: string; base_url?: string; token_env?: string; disabled?: boolean }
 type Topic = { id: string; profile_id: string; title: string; status: string }
 type Draft = { topic_id: string; text: string; format: string; revision: number }
 type Variant = { id: string; topic_id: string; account_id: string; text: string; format: string; status: string; relation: string; source_revision?: string; visibility: string; spoiler_text: string; local_only: boolean; outdated: boolean; published?: boolean }
@@ -41,7 +41,14 @@ const profileName = ref('')
 const accountName = ref('')
 const baseURL = ref('')
 const tokenEnv = ref('')
+const accountSecret = ref('')
 const remoteID = ref('')
+const editingAccountID = ref('')
+const editAccountName = ref('')
+const editBaseURL = ref('')
+const editRemoteID = ref('')
+const editTokenEnv = ref('')
+const editAccountSecret = ref('')
 const topicTitle = ref('')
 const text = ref('')
 const altText = ref('')
@@ -86,9 +93,9 @@ const busyVariantIDs = ref<Set<string>>(new Set())
 const baseURLPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'Bluesky PDS URL' : '平台实例 URL')
 const tokenEnvPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'app password 环境变量名' : 'token 环境变量名')
 const platformDescription = computed(() => ({
-  mastodon: 'Mastodon-compatible：推荐 OAuth 自动连接；也可手动填写实例 URL 与 token 环境变量。',
-  misskey: 'Misskey：推荐 MiAuth 自动连接；也可手动填写实例 URL 与 token 环境变量。',
-  bluesky: 'Bluesky：填写 handle/identifier、PDS URL 与 app password 环境变量。',
+  mastodon: 'Mastodon-compatible：推荐 OAuth 自动连接；也可手动保存 access token，或使用环境变量。',
+  misskey: 'Misskey：推荐 MiAuth 自动连接；也可手动保存 access token，或使用环境变量。',
+  bluesky: 'Bluesky：填写 handle/identifier、PDS（默认 https://bsky.social）与 app password。app password 可直接保存在本机凭据文件，也可使用环境变量。',
   x: 'X：使用浏览器桥接；默认只填入，纯文本可对单次请求确认自动发布。',
   weibo: '微博：使用浏览器桥接填入；发布按钮选择器尚未安全验收，因此最终发布保持人工操作。',
   xiaohongshu: '小红书：使用浏览器桥接填入；发布按钮选择器尚未安全验收，因此最终发布保持人工操作。',
@@ -145,6 +152,9 @@ function setDiagnosticBusy(account: Account, busy: boolean) {
   diagnosticBusy.value = next
 }
 function isMastodon(account?: Account) { return account?.platform === 'mastodon' || account?.platform === 'mastodon-compatible' }
+function accountPlatformChanged() {
+  if (accountPlatform.value === 'bluesky' && !baseURL.value.trim()) baseURL.value = 'https://bsky.social'
+}
 function emojiOwner(variant: Variant) { return emojiLoadedAccountID.value === variant.account_id && variants.value.find((item) => item.account_id === variant.account_id)?.id === variant.id }
 function setVariantBusy(variant: Variant, busy: boolean) {
   const next = new Set(busyVariantIDs.value)
@@ -237,15 +247,55 @@ watch(filteredVariants, (items) => {
   if (!items.some((variant) => variant.id === activeVariantID.value)) activeVariantID.value = items[0]?.id || variants.value[0]?.id || ''
 })
 
-function goSection(next: string) {
+function routeState() {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  const topicMatch = path.match(/^\/topics\/([^/]+)$/)
+  if (topicMatch) {
+    try { return { section: 'editor', topicID: decodeURIComponent(topicMatch[1]) } } catch { return { section: 'topics', topicID: '' } }
+  }
+  if (path === '/history') return { section: 'history', topicID: '' }
+  if (path === '/settings') return { section: 'settings', topicID: '' }
+  return { section: 'topics', topicID: '' }
+}
+function routePath(next: string) { return next === 'history' ? '/history' : next === 'settings' ? '/settings' : next === 'editor' && selected.value ? `/topics/${encodeURIComponent(selected.value.id)}` : '/topics' }
+function goSection(next: string, replace = false) {
   if (section.value === 'editor' && next !== 'editor' && hasUnsavedChanges.value && !window.confirm('还有未保存的稿件修改，确定离开并丢弃这些修改吗？')) return
+  if (next === 'editor' && !selected.value) { next = 'topics' }
   section.value = next
+  const path = routePath(next)
+  if (replace) window.history.replaceState({}, '', path)
+  else if (window.location.pathname !== path) window.history.pushState({}, '', path)
+}
+function followSectionLink(event: MouseEvent, next: string) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  event.preventDefault()
+  goSection(next)
+}
+function followTopicLink(event: MouseEvent, topic: Topic) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  event.preventDefault()
+  void openTopic(topic)
 }
 
 function warnBeforeUnload(event: BeforeUnloadEvent) {
   if (!hasUnsavedChanges.value) return
   event.preventDefault()
   event.returnValue = ''
+}
+async function applyBrowserRoute() {
+  const route = routeState()
+  if (route.section === 'editor' && route.topicID) {
+    const topic = topics.value.find((item) => item.id === route.topicID)
+    if (topic) { await openTopic(topic); return }
+  }
+  section.value = route.section === 'editor' ? 'topics' : route.section
+}
+function onPopState() {
+  if (section.value === 'editor' && hasUnsavedChanges.value && !window.confirm('还有未保存的稿件修改，确定离开并丢弃这些修改吗？')) {
+    window.history.pushState({}, '', routePath('editor'))
+    return
+  }
+  void applyBrowserRoute()
 }
 
 function showError(error: unknown) {
@@ -281,17 +331,39 @@ async function addProfile() {
 async function addAccount() {
   if (!selectedProfileID.value) { message.value = '请先选择 Profile'; return }
   if (!accountName.value.trim()) { message.value = '请填写账号名称'; return }
-  if (!isBridgePlatform(accountPlatform.value) && !baseURL.value.trim()) { message.value = '请填写平台实例 URL'; return }
-  if (!isBridgePlatform(accountPlatform.value) && !tokenEnv.value.trim()) { message.value = '手动添加账号需要填写 token/app password 环境变量名；也可以使用上方自动连接'; return }
+  if (!isBridgePlatform(accountPlatform.value) && accountPlatform.value !== 'bluesky' && !baseURL.value.trim()) { message.value = '请填写平台实例 URL'; return }
+  if (!isBridgePlatform(accountPlatform.value) && !tokenEnv.value.trim() && !accountSecret.value.trim()) { message.value = '请输入 access token/app password，或展开高级选项填写环境变量名'; return }
+  if (tokenEnv.value.trim() && accountSecret.value.trim()) { message.value = '本地凭据和环境变量只能选择一种'; return }
   if (accountPlatform.value === 'bluesky' && !remoteID.value.trim()) { message.value = '请填写 Bluesky handle/identifier'; return }
   try {
-    const created = await api<Account>('accounts', { method: 'POST', body: JSON.stringify({ profile_id: selectedProfileID.value, name: accountName.value, platform: accountPlatform.value, remote_id: remoteID.value, base_url: baseURL.value, token_env: tokenEnv.value }) })
-    accountName.value = ''; baseURL.value = ''; tokenEnv.value = ''; remoteID.value = ''
+    const created = await api<Account>('accounts', { method: 'POST', body: JSON.stringify({ profile_id: selectedProfileID.value, name: accountName.value, platform: accountPlatform.value, remote_id: remoteID.value, base_url: baseURL.value, token_env: tokenEnv.value, secret: accountSecret.value }) })
+    accountName.value = ''; baseURL.value = ''; tokenEnv.value = ''; accountSecret.value = ''; remoteID.value = ''
     await load()
     if (!accounts.value.some((account) => account.id === created.id)) accounts.value.push(created)
     message.value = '账号已添加'
     if (created.platform === 'bluesky') await diagnoseBluesky(created)
     if (isMastodon(created)) await diagnoseMastodon(created)
+  } catch (error) { showError(error) }
+}
+function beginEditAccount(account: Account) {
+  editingAccountID.value = account.id
+  editAccountName.value = account.name
+  editBaseURL.value = account.base_url || ''
+  editRemoteID.value = account.remote_id || ''
+  editTokenEnv.value = ''
+  editAccountSecret.value = ''
+}
+function cancelEditAccount() { editingAccountID.value = ''; editAccountSecret.value = ''; editTokenEnv.value = '' }
+async function updateAccount(account: Account) {
+  if (!editAccountName.value.trim()) { message.value = '账号名称不能为空'; return }
+  if (editTokenEnv.value.trim() && editAccountSecret.value.trim()) { message.value = '新凭据和环境变量只能选择一种'; return }
+  try {
+    const updated = await api<Account>(`accounts/${account.id}/connection`, { method: 'PUT', body: JSON.stringify({ name: editAccountName.value, remote_id: editRemoteID.value, base_url: editBaseURL.value, token_env: editTokenEnv.value, secret: editAccountSecret.value }) })
+    Object.assign(account, updated)
+    cancelEditAccount()
+    message.value = '账号连接信息已更新'
+    if (account.platform === 'bluesky') await diagnoseBluesky(account)
+    if (isMastodon(account)) await diagnoseMastodon(account)
   } catch (error) { showError(error) }
 }
 async function diagnoseBluesky(account: Account) {
@@ -334,6 +406,7 @@ function prepareReconnect(account: Account) {
   remoteID.value = account.remote_id || ''
   baseURL.value = account.base_url || ''
   tokenEnv.value = ''
+  accountSecret.value = ''
   connectionMessage.value = ''
   message.value = account.remote_id ? '已填入停用账号信息；重新授权或手动添加后会恢复原账号及历史关联' : '该账号缺少可识别的远端 ID；请重新添加连接，历史记录仍保留在停用账号下'
 }
@@ -393,6 +466,7 @@ async function openTopic(topic: Topic) {
     translationTargetAccountID.value = profileAccounts.value[0]?.id || ''
     externalImportAccountID.value = profileAccounts.value.find((account) => account.platform === 'misskey' || account.platform === 'bluesky')?.id || ''
     section.value = 'editor'
+    if (window.location.pathname !== `/topics/${encodeURIComponent(topic.id)}`) window.history.pushState({}, '', `/topics/${encodeURIComponent(topic.id)}`)
   } catch (error) { showError(error) }
 }
 
@@ -699,7 +773,9 @@ async function refreshBridgeState() { await syncBridgeState(true) }
 
 onMounted(async () => {
   window.addEventListener('beforeunload', warnBeforeUnload)
+  window.addEventListener('popstate', onPopState)
   await load()
+  await applyBrowserRoute()
   const params = new URLSearchParams(window.location.search)
   const connected = params.get('connection')
   if (connected === 'mastodon' || connected === 'misskey') {
@@ -707,12 +783,13 @@ onMounted(async () => {
     connectionMessage.value = `${connected === 'mastodon' ? 'Mastodon' : 'Misskey'} 连接成功，本地凭据已保存。`
     params.delete('connection')
     const query = params.toString()
-    window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`)
+    window.history.replaceState({}, '', `/settings${query ? `?${query}` : ''}${window.location.hash}`)
   }
   bridgeRefreshTimer = window.setInterval(() => { if (section.value === 'editor') void syncBridgeState(false) }, 3_000)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', warnBeforeUnload)
+  window.removeEventListener('popstate', onPopState)
   if (bridgeRefreshTimer !== undefined) window.clearInterval(bridgeRefreshTimer)
 })
 </script>
@@ -722,10 +799,10 @@ onBeforeUnmount(() => {
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">↗</span><div><strong>Best Post</strong><small>Manager</small></div></div>
       <nav aria-label="主导航">
-        <button :class="{active:section==='topics'}" @click="goSection('topics')"><span>⌂</span> 内容</button>
-        <button :class="{active:section==='editor'}" @click="goSection('editor')"><span>✎</span> 当前编辑</button>
-        <button :class="{active:section==='history'}" @click="goSection('history')"><span>↗</span> 发布记录</button>
-        <button :class="{active:section==='settings'}" @click="goSection('settings')"><span>⚙</span> 设置</button>
+        <a class="nav-link" :class="{active:section==='topics'}" href="/topics" @click="followSectionLink($event, 'topics')"><span>⌂</span> 内容</a>
+        <a class="nav-link" :class="{active:section==='editor'}" :href="routePath('editor')" @click="followSectionLink($event, 'editor')"><span>✎</span> 当前编辑</a>
+        <a class="nav-link" :class="{active:section==='history'}" href="/history" @click="followSectionLink($event, 'history')"><span>↗</span> 发布记录</a>
+        <a class="nav-link" :class="{active:section==='settings'}" href="/settings" @click="followSectionLink($event, 'settings')"><span>⚙</span> 设置</a>
       </nav>
       <div class="local-status"><span class="status-dot"></span><div><strong>本地单用户</strong><small>数据保存在本机</small></div></div>
     </aside>
@@ -736,7 +813,7 @@ onBeforeUnmount(() => {
         <div class="profile-picker"><label for="content-profile">当前 Profile</label><select id="content-profile" v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select><button class="text-button" @click="goSection('settings')">管理 Profile 与账号 →</button></div>
         <form class="topic-create" @submit.prevent="addTopic"><input v-model="topicTitle" placeholder="新话题标题" :disabled="!selectedProfileID"><button class="primary-action" :disabled="!selectedProfileID">创建话题</button></form>
         <div class="section-label"><span>话题</span><small>{{profileTopics.length}} 个</small><label v-if="topics.some(topic=>topic.profile_id===selectedProfileID&&topic.status==='archived')" class="inline-check"><input type="checkbox" v-model="showArchivedTopics">显示已归档</label></div>
-        <p v-if="profiles.length===0" class="empty-state">还没有 Profile。前往设置创建后，就可以开始第一个话题。</p><p v-else-if="profileTopics.length===0" class="empty-state">这个 Profile 还没有话题，从上方写下第一个标题吧。</p><ul v-else class="rows topic-list"><li v-for="topic in profileTopics" :key="topic.id"><button class="link" @click="openTopic(topic)">{{topic.title}}</button><span>{{topic.status==='archived'?'已归档':'进行中'}}</span><button class="text-button" @click="setTopicStatus(topic, topic.status==='archived'?'active':'archived')">{{topic.status==='archived'?'恢复':'归档'}}</button></li></ul>
+        <p v-if="profiles.length===0" class="empty-state">还没有 Profile。前往设置创建后，就可以开始第一个话题。</p><p v-else-if="profileTopics.length===0" class="empty-state">这个 Profile 还没有话题，从上方写下第一个标题吧。</p><ul v-else class="rows topic-list"><li v-for="topic in profileTopics" :key="topic.id"><a class="link" :href="`/topics/${encodeURIComponent(topic.id)}`" @click="followTopicLink($event, topic)">{{topic.title}}</a><span>{{topic.status==='archived'?'已归档':'进行中'}}</span><button class="text-button" @click="setTopicStatus(topic, topic.status==='archived'?'active':'archived')">{{topic.status==='archived'?'恢复':'归档'}}</button></li></ul>
       </section>
       <section v-else-if="section==='editor' && selected" class="page-section editor-page">
         <button class="back" @click="goSection('topics')">← 返回内容</button><div class="eyebrow">正在编辑</div><div class="topic-title-editor"><input v-model="topicTitleEdit" aria-label="话题标题"><button :disabled="!topicTitleDirty" @click="renameSelectedTopic">重命名</button></div><p class="lede">基础稿是源头；平台版本只在你确认后更新。<span class="help-tip" tabindex="0" role="img" aria-label="平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本。</span></span></p>
@@ -759,22 +836,22 @@ onBeforeUnmount(() => {
       <section v-else-if="section==='settings'" class="page-section settings-page">
         <div class="eyebrow">偏好与连接</div><h1>设置</h1><p class="lede">Profile、账号和本地工具配置。</p>
         <div class="section-label"><span>Profile</span><small>内容分组</small></div><form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button class="primary-action">添加 Profile</button></form>
-        <div class="section-label"><span>平台账号</span><small>自动连接存本地凭据；手动模式引用环境变量</small></div>
+        <div class="section-label"><span>平台账号</span><small>支持自动授权、本地凭据或环境变量</small></div>
         <form class="account-setup" @submit.prevent="addAccount">
           <div class="account-identity-grid">
             <label><span>内容分组</span><select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select></label>
             <label><span>账号名称</span><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"></label>
-            <label><span>平台</span><select v-model="accountPlatform" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select></label>
+            <label><span>平台</span><select v-model="accountPlatform" @change="accountPlatformChanged" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select></label>
           </div>
           <details class="inline-help platform-description"><summary>平台说明</summary><p class="settings-note">{{platformDescription}}</p></details>
           <label v-if="accountPlatform==='bluesky'" class="account-field"><span>远端身份</span><input v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"></label>
           <label v-if="!isBridgePlatform(accountPlatform)" class="account-field"><span>实例地址</span><input v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"></label>
           <div v-if="accountPlatform==='mastodon' || accountPlatform==='misskey'" class="connection-inline"><button type="button" class="primary-action" @click="startConnection(accountPlatform)" :disabled="!selectedProfileID || !baseURL.trim()">{{accountPlatform==='mastodon'?'OAuth 自动连接':'MiAuth 自动连接'}}</button><small>推荐。授权在当前回环服务完成，成功后自动添加账号。</small></div>
           <p v-if="connectionMessage" class="notice">{{connectionMessage}}</p>
-          <div v-if="!isBridgePlatform(accountPlatform)" class="manual-account-row"><label class="account-field"><span>环境变量名</span><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"></label><button :disabled="!selectedProfileID">手动添加</button></div>
+          <div v-if="!isBridgePlatform(accountPlatform)" class="manual-account-row"><label class="account-field"><span>本地凭据（推荐）</span><input v-model="accountSecret" type="password" autocomplete="new-password" placeholder="access token / app password" :disabled="!selectedProfileID"></label><details class="credential-advanced"><summary>高级：使用环境变量</summary><label class="account-field"><span>环境变量名</span><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"></label><small>本地模式会将凭据保存在数据目录的权限受限文件中；环境变量只在发布时读取。</small></details><button :disabled="!selectedProfileID">手动添加</button></div>
           <button v-else class="primary-action" :disabled="!selectedProfileID">添加桥接账号</button>
         </form>
-        <ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><div class="account-row-main"><span>{{account.name}} · {{account.platform}}</span><div class="row-actions"><button v-if="account.platform==='bluesky'" type="button" @click="diagnoseBluesky(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button v-if="isMastodon(account)" type="button" @click="diagnoseMastodon(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button type="button" @click="removeAccount(account)">停用并移除凭据</button></div></div><details v-if="account.platform==='bluesky'" class="account-diagnostic"><summary>Bluesky 连接诊断</summary><p v-if="!blueskyDiagnostic[account.id]" class="settings-note">尚未检测。测试只会创建会话，不会发布内容；凭据不会返回或写入日志。</p><div v-else :class="['diagnostic-result', blueskyDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{blueskyDiagnostic[account.id].message}}</strong><small>阶段：{{blueskyDiagnostic[account.id].stage}} · 分类：{{blueskyDiagnostic[account.id].category || 'ok'}} · {{blueskyDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="blueskyDiagnostic[account.id].handle">身份：@{{blueskyDiagnostic[account.id].handle}} · {{blueskyDiagnostic[account.id].did}}</small><small v-if="blueskyDiagnostic[account.id].hint">建议：{{blueskyDiagnostic[account.id].hint}}</small></div></details><details v-else-if="isMastodon(account)" class="account-diagnostic"><summary>Mastodon 连接诊断</summary><p v-if="!mastodonDiagnostic[account.id]" class="settings-note">尚未检测。不会发布动态或上传媒体；OPTIONS 只检查端点兼容性，不能证明写入 scope。</p><div v-else :class="['diagnostic-result', mastodonDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{mastodonDiagnostic[account.id].message}}</strong><small>阶段：{{mastodonDiagnostic[account.id].stage}} · 分类：{{mastodonDiagnostic[account.id].category || 'ok'}} · {{mastodonDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="mastodonDiagnostic[account.id].username">身份：@{{mastodonDiagnostic[account.id].username}} · {{mastodonDiagnostic[account.id].account_id}}</small><small>发帖端点：{{mastodonDiagnostic[account.id].status_write.message}}</small><small>媒体端点：{{mastodonDiagnostic[account.id].media_write.message}}</small><small v-if="mastodonDiagnostic[account.id].hint">建议：{{mastodonDiagnostic[account.id].hint}}</small></div></details></li></ul>
+        <ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><div class="account-row-main"><span>{{account.name}} · {{account.platform}}</span><div class="row-actions"><button v-if="account.platform==='bluesky'" type="button" @click="diagnoseBluesky(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button v-if="isMastodon(account)" type="button" @click="diagnoseMastodon(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button type="button" @click="beginEditAccount(account)">编辑连接</button><button type="button" @click="removeAccount(account)">停用并移除凭据</button></div></div><details v-if="editingAccountID===account.id" class="account-edit" open><summary>编辑连接信息</summary><form @submit.prevent="updateAccount(account)"><label>名称<input v-model="editAccountName"></label><label v-if="account.platform==='bluesky'">handle / DID<input v-model="editRemoteID"></label><label v-if="!isBridgePlatform(account.platform)">服务地址<input v-model="editBaseURL"></label><label v-if="!isBridgePlatform(account.platform)">新 access token / app password（留空保持不变）<input v-model="editAccountSecret" type="password" autocomplete="new-password"></label><details v-if="!isBridgePlatform(account.platform)" class="credential-advanced"><summary>切换到环境变量</summary><input v-model="editTokenEnv" placeholder="环境变量名（留空保持当前凭据）"><small>填写后会清除当前本地凭据引用。</small></details><div class="row-actions"><button type="submit" class="primary-action">保存连接信息</button><button type="button" @click="cancelEditAccount">取消</button></div></form></details><details v-if="account.platform==='bluesky'" class="account-diagnostic"><summary>Bluesky 连接诊断</summary><p v-if="!blueskyDiagnostic[account.id]" class="settings-note">尚未检测。测试只会创建会话，不会发布内容；凭据不会返回或写入日志。</p><div v-else :class="['diagnostic-result', blueskyDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{blueskyDiagnostic[account.id].message}}</strong><small>阶段：{{blueskyDiagnostic[account.id].stage}} · 分类：{{blueskyDiagnostic[account.id].category || 'ok'}} · {{blueskyDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="blueskyDiagnostic[account.id].handle">身份：@{{blueskyDiagnostic[account.id].handle}} · {{blueskyDiagnostic[account.id].did}}</small><small v-if="blueskyDiagnostic[account.id].hint">建议：{{blueskyDiagnostic[account.id].hint}}</small></div></details><details v-else-if="isMastodon(account)" class="account-diagnostic"><summary>Mastodon 连接诊断</summary><p v-if="!mastodonDiagnostic[account.id]" class="settings-note">尚未检测。不会发布动态或上传媒体；OPTIONS 只检查端点兼容性，不能证明写入 scope。</p><div v-else :class="['diagnostic-result', mastodonDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{mastodonDiagnostic[account.id].message}}</strong><small>阶段：{{mastodonDiagnostic[account.id].stage}} · 分类：{{mastodonDiagnostic[account.id].category || 'ok'}} · {{mastodonDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="mastodonDiagnostic[account.id].username">身份：@{{mastodonDiagnostic[account.id].username}} · {{mastodonDiagnostic[account.id].account_id}}</small><small>发帖端点：{{mastodonDiagnostic[account.id].status_write.message}}</small><small>媒体端点：{{mastodonDiagnostic[account.id].media_write.message}}</small><small v-if="mastodonDiagnostic[account.id].hint">建议：{{mastodonDiagnostic[account.id].hint}}</small></div></details></li></ul>
         <div v-if="disabledProfileAccounts.length" class="disabled-accounts"><small>已停用账号（历史仍保留）</small><ul class="rows account-list"><li v-for="account in disabledProfileAccounts" :key="account.id"><span>{{account.name}} · {{account.platform}}</span><button type="button" @click="prepareReconnect(account)">准备重新连接</button></li></ul></div><div class="section-label"><span>翻译 provider</span><small>配置不包含 key/token</small></div><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option><option value="google-gtx">Google translate_a（非官方）</option></select><p class="settings-note platform-description">{{translationProviderDescription}}</p><input v-if="translationProvider!=='google-gtx'" v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="自定义 API 地址（高级，可选）"><input v-if="translationProvider!=='google-gtx'" v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form><p v-if="translationMessage" class="notice">{{translationMessage}}</p>
         <details class="tool-section backup-section"><summary>备份与凭据 <small>离线可恢复</small></summary><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前同源脚本</a>。每个平台首次输入一次 code，之后保存在油猴隔离存储；可在悬浮窗断开或从 WebUI 撤销。使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值或其他明文凭据。</p></details>
       </section>

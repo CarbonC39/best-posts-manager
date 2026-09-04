@@ -19,12 +19,15 @@ import (
 func TestBlueskyFacetBlobRecordAndImport(t *testing.T) {
 	t.Setenv("BSKY_APP_PASSWORD", "app-password")
 	var record map[string]any
+	var sessionRequest map[string]string
+	var createAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/xrpc/com.atproto.server.createSession":
 			if r.Method != http.MethodPost {
 				t.Errorf("createSession must use POST, got %s", r.Method)
 			}
+			_ = json.NewDecoder(r.Body).Decode(&sessionRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"did": "did:plc:test", "handle": "me.test", "accessJwt": "jwt"})
 		case "/xrpc/com.atproto.repo.uploadBlob":
 			if r.Method != http.MethodPost {
@@ -41,6 +44,7 @@ func TestBlueskyFacetBlobRecordAndImport(t *testing.T) {
 				t.Errorf("createRecord must use POST, got %s", r.Method)
 			}
 			_ = json.NewDecoder(r.Body).Decode(&record)
+			createAuth = r.Header.Get("Authorization")
 			_ = json.NewEncoder(w).Encode(map[string]string{"uri": "at://did:plc:test/app.bsky.feed.post/r1", "cid": "cid1"})
 		case "/xrpc/com.atproto.repo.getRecord":
 			if r.Method != http.MethodGet {
@@ -61,6 +65,15 @@ func TestBlueskyFacetBlobRecordAndImport(t *testing.T) {
 	res, err := c.Publish(context.Background(), a, app.Variant{Text: "你好 @alice.test https://x.test", Format: "plain"}, []app.Media{{Path: p, MIME: "image/png", Size: 3}})
 	if err != nil || res.ID != "at://did:plc:test/app.bsky.feed.post/r1" || res.URL != "https://bsky.app/profile/did:plc:test/post/r1" || res.CID != "cid1" {
 		t.Fatalf("publish: %+v %v", res, err)
+	}
+	if createAuth != "Bearer jwt" {
+		t.Fatalf("createRecord authorization=%q", createAuth)
+	}
+	if sessionRequest["identifier"] != "me.test" || sessionRequest["password"] != "app-password" {
+		t.Fatalf("createSession request=%v", sessionRequest)
+	}
+	if record["repo"] != "did:plc:test" || record["collection"] != "app.bsky.feed.post" {
+		t.Fatalf("createRecord target=%v", record)
 	}
 	r := record["record"].(map[string]any)
 	facets := r["facets"].([]any)
@@ -87,6 +100,20 @@ func TestBlueskyFacetBlobRecordAndImport(t *testing.T) {
 	post, err := c.Import(context.Background(), a, "https://bsky.app/profile/me.test/post/r1")
 	if err != nil || post.TextSnapshot != "imported" || post.URL == "" {
 		t.Fatalf("import: %+v %v", post, err)
+	}
+}
+
+func TestBlueskyPDSURLNormalization(t *testing.T) {
+	for _, raw := range []string{"", "bsky.social", "bsky.social/", "https://bsky.social", "https://bsky.social/"} {
+		got, err := NormalizePDSURL(raw)
+		if err != nil || got != "https://bsky.social" {
+			t.Fatalf("normalize %q => %q, %v", raw, got, err)
+		}
+	}
+	for _, raw := range []string{"https://bsky.social/x", "https://bsky.social?x=1", "https://user:pass@bsky.social", "ftp://bsky.social"} {
+		if _, err := NormalizePDSURL(raw); err == nil {
+			t.Fatalf("accepted invalid PDS URL %q", raw)
+		}
 	}
 }
 

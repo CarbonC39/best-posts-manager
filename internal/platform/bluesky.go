@@ -44,6 +44,34 @@ func NewBlueskyClient() *BlueskyClient {
 	return &BlueskyClient{HTTP: &http.Client{Timeout: 30 * time.Second}}
 }
 
+// normalizePDSURL accepts both the canonical host and a trailing slash, but
+// rejects values that cannot safely be used as the PDS origin. A bsky.app
+// profile URL, credentials, path, or query is not a PDS URL.
+func normalizePDSURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "https://bsky.social"
+	} else if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	if strings.ContainsAny(raw, "\r\n\t") {
+		return "", errors.New("PDS address is empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") || u.RawPath != "" {
+		return "", errors.New("PDS address must be an http(s) origin")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" {
+		return "", errors.New("PDS address must be an http(s) origin")
+	}
+	u.Path = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+// NormalizePDSURL is shared by account setup and every Bluesky request so a
+// canonical origin is stored and used consistently.
+func NormalizePDSURL(raw string) (string, error) { return normalizePDSURL(raw) }
+
 // CheckConnection validates the local configuration and performs a harmless
 // createSession call. It never publishes, reads a post, or logs credentials.
 func (c *BlueskyClient) CheckConnection(ctx context.Context, a app.Account) BlueskyDiagnostic {
@@ -58,12 +86,12 @@ func (c *BlueskyClient) CheckConnection(ctx context.Context, a app.Account) Blue
 		}
 		return d
 	}
-	base := strings.TrimSpace(a.BaseURL)
-	u, err := url.ParseRequestURI(base)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+	base, err := normalizePDSURL(a.BaseURL)
+	if err != nil {
 		d.Category, d.Message, d.Hint = "config", "PDS 地址无效", "填写完整的 http(s)://PDS 地址，不要包含账号密码或发布页面路径"
 		return finish()
 	}
+	a.BaseURL = base
 	identity := strings.TrimSpace(a.RemoteID)
 	if identity == "" || strings.ContainsAny(identity, " \t\r\n") {
 		d.Category, d.Message, d.Hint = "config", "Bluesky 身份为空", "填写 handle（例如 alice.bsky.social）或 DID"
@@ -119,8 +147,12 @@ type bskySession struct {
 }
 
 func (c *BlueskyClient) call(ctx context.Context, a app.Account, method string, payload any, stage, token string) (json.RawMessage, error) {
+	base, e := normalizePDSURL(a.BaseURL)
+	if e != nil {
+		return nil, &Error{Category: "config", Stage: stage, Err: e}
+	}
 	raw, _ := json.Marshal(payload)
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.BaseURL, "/")+"/xrpc/"+method, bytes.NewReader(raw))
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, base+"/xrpc/"+method, bytes.NewReader(raw))
 	if e != nil {
 		return nil, &Error{Category: "network", Stage: stage, Err: e}
 	}
@@ -138,7 +170,11 @@ func (c *BlueskyClient) call(ctx context.Context, a app.Account, method string, 
 // query handles XRPC read methods, which use GET query parameters rather than
 // POST JSON (notably resolveHandle and repo.getRecord).
 func (c *BlueskyClient) query(ctx context.Context, a app.Account, method string, params url.Values, stage, token string) (json.RawMessage, error) {
-	u := strings.TrimRight(a.BaseURL, "/") + "/xrpc/" + method
+	base, e := normalizePDSURL(a.BaseURL)
+	if e != nil {
+		return nil, &Error{Category: "config", Stage: stage, Err: e}
+	}
+	u := base + "/xrpc/" + method
 	if len(params) > 0 {
 		u += "?" + params.Encode()
 	}
@@ -330,7 +366,11 @@ func (c *BlueskyClient) Publish(ctx context.Context, a app.Account, v app.Varian
 	return Result{ID: result.URI, URL: bskyURL(result.URI), CID: result.CID}, nil
 }
 func (c *BlueskyClient) uploadBlob(ctx context.Context, a app.Account, data []byte, mime, token string) (json.RawMessage, error) {
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(a.BaseURL, "/")+"/xrpc/com.atproto.repo.uploadBlob", bytes.NewReader(data))
+	base, e := normalizePDSURL(a.BaseURL)
+	if e != nil {
+		return nil, &Error{Category: "config", Stage: "media", Err: e}
+	}
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, base+"/xrpc/com.atproto.repo.uploadBlob", bytes.NewReader(data))
 	if e != nil {
 		return nil, &Error{Category: "network", Stage: "media", Err: e}
 	}
