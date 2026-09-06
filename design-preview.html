@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Best Post Manager · 编辑工作台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #fff;
+      --shell: #f7f8f6;
+      --subtle: #f3f5f2;
+      --ink: #20241f;
+      --ink-2: #60675f;
+      --ink-3: #969d95;
+      --line: #e2e6e0;
+      --line-strong: #d2d8d1;
+      --pine: #264e36;
+      --pine-hover: #1e3f2c;
+      --pine-soft: #edf5f0;
+      --pine-ink: #173625;
+      --cyan: #5f8d95;
+      --cyan-hover: #4f7980;
+      --cyan-soft: #ecf3f4;
+      --cyan-ink: #23484e;
+      --cyan-line: #ccdee1;
+      --green: #5da777;
+      --green-soft: #eaf4ed;
+      --warn: #e3a460;
+      --warn-soft: #fbf4e9;
+      --danger: #a6534c;
+      --danger-soft: #faeeec;
+      --shadow: 0 18px 52px rgb(32 45 36 / 13%);
+      --shadow-small: 0 6px 20px rgb(32 45 36 / 9%);
+      font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+      font-synthesis: none;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-width: 320px; min-height: 100%; margin: 0; }
+    body { color: var(--ink); background: var(--paper); overflow: hidden; }
+    button, input, textarea, select { color: inherit; font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: 3px solid rgb(95 141 149 / 40%);
+      outline-offset: 2px;
+    }
+    svg { display: block; }
+    .hidden { display: none !important; }
+
+    .app { display: grid; grid-template-columns: 238px minmax(0, 1fr); height: 100vh; overflow: hidden; }
+    .sidebar { display: flex; min-width: 0; flex-direction: column; border-right: 1px solid var(--line); background: var(--shell); }
+    .main { min-width: 0; overflow-y: auto; background: var(--paper); }
+
+    .brand { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 14px; }
+    .brand-mark { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 9px; color: #fff; background: var(--pine); }
+    .brand-mark svg { width: 16px; height: 16px; }
+    .brand-copy strong, .brand-copy small { display: block; line-height: 1; }
+    .brand-copy strong { font-size: 13px; letter-spacing: -.015em; }
+    .brand-copy small { margin-top: 5px; color: var(--ink-3); font-size: 8px; letter-spacing: .13em; text-transform: uppercase; }
+
+    .topic-heading { display: flex; align-items: flex-end; gap: 2px; padding: 3px 9px 0; box-shadow: 0 1px 0 var(--line); }
+    .topic-tab { height: 28px; padding: 0 11px; border: 0; border-radius: 7px 7px 0 0; color: var(--ink-3); background: transparent; font-size: 9px; font-weight: 620; letter-spacing: .02em; }
+    .topic-tab:hover { color: var(--ink-2); background: #eef1ed; }
+    .topic-tab.active { margin-bottom: -1px; color: var(--ink); background: #fff; box-shadow: inset 1px 0 0 var(--line), inset -1px 0 0 var(--line), inset 0 1px 0 var(--line); }
+    .topic-panel { margin: 0 9px 12px; padding: 8px; border: 0; border-radius: 0 8px 8px 8px; background: #fff; box-shadow: inset 1px 0 0 var(--line), inset -1px 0 0 var(--line), inset 0 -1px 0 var(--line); }
+    .topic-panel-body input, .topic-panel-body select { width: 100%; height: 32px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 10px; }
+    .icon-button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 7px; color: var(--ink-3); background: transparent; }
+    .icon-button:hover { color: var(--pine-ink); background: var(--pine-soft); }
+    .icon-button svg { width: 15px; height: 15px; }
+
+    .topic-list { flex: 1; margin: 3px 0 0; padding: 0 8px 14px; overflow-y: auto; list-style: none; }
+    .topic-item { width: 100%; margin: 1px 0; padding: 10px 10px 9px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
+    .topic-item:hover { background: #eef1ed; }
+    .topic-item.active { background: var(--cyan-soft); }
+    .topic-item strong, .topic-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topic-item strong { color: #3b403a; font-size: 11px; font-weight: 640; }
+    .topic-item small { margin-top: 4px; color: var(--ink-3); font-size: 8px; }
+    .topic-dot { display: inline-block; flex: none; width: 6px; height: 6px; border-radius: 50%; margin-left: 4px; background: #c9cfc8; vertical-align: .5px; }
+    .topic-dot.orange { background: var(--warn); }
+    .topic-dot.green { background: var(--green); }
+    .topic-item.active strong { color: var(--cyan-ink); }
+
+    .side-nav { padding: 10px 10px 13px; border-top: 1px solid var(--line); }
+    .side-link { position: relative; display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 0 8px; border: 0; border-radius: 7px; color: var(--ink-2); background: transparent; font-size: 10px; text-align: left; }
+    .side-link:hover, .side-link.active { color: var(--pine-ink); background: var(--pine-soft); }
+    .side-link svg { width: 14px; height: 14px; color: var(--ink-3); }
+    .side-link.active svg { color: var(--pine); }
+    .side-link span { margin-left: auto; min-width: 17px; padding: 2px 5px; border-radius: 8px; color: #fff; background: var(--cyan); font-size: 8px; text-align: center; }
+
+    .mobile-bar { display: none; }
+    .editor-page { width: min(820px, calc(100% - 72px)); margin: 0 auto; padding: 54px 0 100px; }
+    .editor-head { display: flex; align-items: flex-start; gap: 20px; }
+    .editor-head-main { min-width: 0; flex: 1; }
+    .breadcrumb { color: var(--ink-3); font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+    .title-row { display: flex; align-items: center; gap: 18px; margin-top: 7px; }
+    .topic-title { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0 !important; background: transparent; font-size: 32px; font-weight: 700; letter-spacing: -.045em; }
+    .save-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; color: var(--ink-3); font-size: 9px; white-space: nowrap; }
+    .save-status svg { width: 11px; height: 11px; color: var(--green); }
+    .title-meta { margin-top: 7px; color: var(--ink-3); font-size: 9px; }
+    .more-button { margin-top: 16px; }
+
+    .variant-section { margin-top: 30px; }
+    .section-kicker { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; color: var(--ink-3); font-size: 8px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
+    .section-kicker button { border: 0; padding: 3px 0; color: var(--cyan-ink); background: transparent; font-size: 9px; font-weight: 650; letter-spacing: 0; text-transform: none; }
+    .section-kicker button:hover { color: var(--cyan-hover); }
+    .variant-row { display: flex; align-items: flex-end; gap: 2px; padding: 8px 8px 0; box-shadow: 0 1px 0 var(--cyan-line); }
+    .variant-tab { position: relative; display: flex; align-items: flex-start; gap: 8px; flex: 1 1 0; min-width: 0; height: 55px; padding: 8px 10px; border: 0; border-right: 1px solid var(--line); background: #fff; text-align: left; }
+    .variant-icon { display: grid; flex: 0 0 auto; place-items: center; width: 13px; height: 13px; margin-top: 1px; color: var(--ink-2); }
+    .variant-icon svg { width: 13px; height: 13px; }
+    .variant-copy { display: flex; flex-direction: column; min-width: 0; }
+    .variant-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .variant-close { position: absolute; top: 5px; right: 6px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 4px; color: var(--ink-3); font-size: 10px; line-height: 1; }
+    .variant-tab:hover .variant-close { color: var(--danger); background: var(--danger-soft); }
+    .variant-tab:hover { background: var(--subtle); }
+    .variant-tab.active { margin-bottom: -1px; border-radius: 8px 8px 0 0; background: var(--cyan-soft); }
+    .variant-tab strong, .variant-tab small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .variant-tab strong { font-size: 10px; font-weight: 650; }
+    .variant-tab small { margin-top: 4px; color: var(--ink-3); font-size: 8px; }
+    .variant-tab small.ready { color: var(--green); }
+    .variant-tab small.warn { color: var(--warn); }
+    .variant-tab small.error { color: var(--danger); }
+    .add-variant { display: grid; place-items: center; flex: 0 0 44px; height: 55px; border: 0; color: var(--ink-3); background: transparent; font-size: 17px; }
+    .add-variant:hover { color: var(--pine-ink); background: var(--pine-soft); }
+
+    .editing-label { display: flex; align-items: center; justify-content: space-between; min-height: 46px; color: var(--ink-3); font-size: 9px; }
+    .editing-label strong { color: var(--ink-2); font-size: 10px; }
+    .source-update { border: 0; border-radius: 6px; padding: 5px 8px; color: var(--warn); background: var(--warn-soft); font-size: 8px; }
+    .post-editor { display: block; width: 100%; min-height: 280px; padding: 28px 0 28px; border: 0; outline: 0 !important; resize: none; color: #2a2e29; background: transparent; font-family: ui-serif, "Songti SC", "Noto Serif CJK SC", Georgia, serif; font-size: 16px; line-height: 1.85; letter-spacing: .008em; }
+    .post-editor::placeholder { color: #bbc1ba; }
+    .editor-tools { display: flex; align-items: center; justify-content: space-between; min-height: 44px; border-top: 0; background: var(--cyan-soft); }
+    .editor-shell { background: var(--cyan-soft); padding: 24px 24px 0; border-radius: 12px; box-shadow: 0 14px 34px rgb(35 72 78 / .12); }
+    .editor-paper { background: #fff; border-radius: 8px; }
+    .tool-group { display: flex; align-items: center; gap: 2px; }
+    .tool-button { display: inline-flex; align-items: center; gap: 5px; height: 29px; padding: 0 7px; border: 0; border-radius: 6px; color: var(--ink-3); background: transparent; font-size: 9px; }
+    .tool-button:hover { color: var(--pine-ink); background: var(--pine-soft); }
+    .tool-button svg { width: 13px; height: 13px; }
+    .tools-right { display: flex; align-items: center; gap: 10px; }
+    .update-hint { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; border: 0; border-radius: 999px; color: var(--warn); background: var(--warn-soft); font-size: 9px; font-weight: 650; }
+    .update-hint::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: var(--warn); }
+    .update-hint:hover { background: #f6e8d2; }
+    .counter { color: var(--ink-3); font-size: 9px; font-variant-numeric: tabular-nums; }
+    .counter.warn { color: var(--warn); font-weight: 650; }
+
+    .flow-section { padding: 25px 0; border-top: 1px solid var(--line); }
+    .flow-section:first-of-type { border-top: 0; }
+    .flow-head { display: flex; align-items: baseline; justify-content: space-between; gap: 15px; margin-bottom: 15px; }
+    .flow-head strong { font-size: 14px; }
+    .flow-head span { color: var(--ink-3); font-size: 10px; }
+
+    .media-row { display: flex; gap: 9px; overflow-x: auto; }
+    .media-item, .add-media { position: relative; flex: 0 0 74px; width: 74px; height: 74px; border-radius: 9px; overflow: hidden; }
+    .media-item { border: 1px solid var(--line); }
+    .photo-one { background: linear-gradient(155deg, #dcebd5 0 45%, #86a379 46% 63%, #465f3d 64%); }
+    .photo-one::before { content: ""; position: absolute; top: 8px; right: 8px; width: 25px; height: 25px; border-radius: 50%; background: #f8dc92; }
+    .photo-two { background: linear-gradient(145deg, #cbdde6 0 41%, #80a0ae 42% 60%, #dccbac 61%); }
+    .photo-two::before { content: ""; position: absolute; top: 15px; left: 23px; width: 29px; height: 43px; border-radius: 3px 3px 9px 9px; background: #f9f5eb; }
+    .media-label { position: absolute; right: 4px; bottom: 4px; padding: 3px 4px; border-radius: 4px; color: #fff; background: rgb(25 29 25 / 72%); font-size: 7px; }
+    .media-label.missing { color: #65491e; background: rgb(249 226 187 / 94%); }
+    .add-media { display: grid; place-items: center; border: 1px dashed var(--line-strong); color: var(--ink-3); background: var(--subtle); }
+    .add-media:hover { color: var(--pine); border-color: var(--cyan); background: var(--cyan-soft); }
+    .add-media svg { width: 17px; height: 17px; }
+
+    .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .field { display: grid; gap: 6px; }
+    .field label { color: var(--ink-2); font-size: 9px; }
+    .field select, .field input { width: 100%; height: 37px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 10px; }
+    .relation-note { display: flex; align-items: center; gap: 7px; grid-column: 1 / -1; margin-top: 1px; color: var(--ink-3); font-size: 8px; }
+    .relation-note span { padding: 3px 6px; border-radius: 5px; color: var(--pine); background: var(--pine-soft); }
+
+    .check-panel { border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+    .check-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-height: 50px; padding: 8px 13px; border-bottom: 1px solid var(--line); }
+    .check-row:last-child { border-bottom: 0; }
+    .check-mark { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: var(--green); background: var(--green-soft); font-size: 9px; font-weight: 750; }
+    .check-mark.warn { color: var(--warn); background: var(--warn-soft); }
+    .check-copy strong, .check-copy small { display: block; }
+    .check-copy strong { font-size: 9px; }
+    .check-copy small { margin-top: 3px; color: var(--ink-3); font-size: 8px; }
+    .check-result { color: var(--green); font-size: 8px; }
+    .check-result.warn { color: var(--warn); }
+    .edit-link { border: 0; padding: 3px; color: var(--cyan-ink); background: transparent; font-size: 8px; }
+    .edit-link:hover { color: var(--cyan-hover); }
+
+    .publish-area { padding-top: 24px; text-align: right; }
+    .publish-button { min-width: 210px; height: 43px; border: 0; border-radius: 8px; color: #fff; background: var(--pine); box-shadow: 0 5px 16px rgb(38 78 54 / 22%); font-size: 11px; font-weight: 720; }
+    .publish-button:hover { background: var(--pine-hover); }
+    .publish-button:disabled { opacity: .45; cursor: not-allowed; }
+    .publish-area p { margin: 8px 0 0; color: var(--ink-3); font-size: 8px; }
+
+    .management-page { width: min(1040px, calc(100% - 72px)); margin: 0 auto; padding: 54px 0 100px; }
+    .management-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+    .management-head h1 { margin: 7px 0 0; font-size: 31px; letter-spacing: -.04em; }
+    .management-head p { margin: 8px 0 0; color: var(--ink-3); font-size: 10px; }
+    .primary-button { min-height: 38px; padding: 0 14px; border: 0; border-radius: 8px; color: #fff; background: var(--pine); font-size: 10px; font-weight: 680; }
+    .primary-button:hover { background: var(--pine-hover); }
+    .management-tools { display: flex; align-items: center; gap: 8px; margin-top: 27px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .management-search { position: relative; width: min(330px, 100%); }
+    .management-search svg { position: absolute; top: 10px; left: 10px; width: 14px; height: 14px; color: var(--ink-3); }
+    .management-search input { width: 100%; height: 35px; padding: 0 10px 0 32px; border: 1px solid var(--line); border-radius: 7px; font-size: 10px; }
+    .filter { height: 31px; padding: 0 9px; border: 0; border-radius: 6px; color: var(--ink-3); background: transparent; font-size: 9px; }
+    .filter.active { color: var(--cyan-ink); background: var(--cyan-soft); }
+    .profile-select { margin-left: auto; height: 33px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 9px; }
+    .management-list { margin: 0; padding: 0; list-style: none; }
+    .management-row { display: grid; grid-template-columns: minmax(240px, 1.5fr) minmax(150px, .8fr) minmax(140px, .65fr) 92px; align-items: center; gap: 16px; min-height: 68px; padding: 10px 3px; border-bottom: 1px solid var(--line); }
+    .row-main strong, .row-main small, .progress strong, .progress small { display: block; }
+    .row-main strong { font-size: 11px; }
+    .row-main small, .progress small { margin-top: 4px; color: var(--ink-3); font-size: 8px; }
+    .progress strong { color: var(--ink-2); font-size: 9px; font-weight: 620; }
+    .platforms { display: flex; gap: 5px; }
+    .platform-badge { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; color: #fff; font-size: 8px; font-weight: 750; }
+    .masto { background: #7167aa; } .x { background: #282b28; } .bsky { background: #4394d5; } .weibo { background: #d85b62; }
+    .row-action { justify-self: end; border: 0; padding: 6px 8px; border-radius: 6px; color: var(--cyan-ink); background: transparent; font-size: 9px; }
+    .row-action:hover { background: var(--cyan-soft); }
+
+    .account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 24px; }
+    .account-card { padding: 16px; border: 1px solid var(--line); border-radius: 11px; }
+    .account-top { display: flex; align-items: center; gap: 10px; }
+    .account-top .platform-badge { width: 31px; height: 31px; }
+    .account-top strong, .account-top small { display: block; }
+    .account-top strong { font-size: 10px; }
+    .account-top small { margin-top: 3px; color: var(--ink-3); font-size: 8px; }
+    .account-card p { min-height: 30px; margin: 14px 0; color: var(--ink-3); font-size: 8px; line-height: 1.6; }
+    .account-foot { display: flex; align-items: center; justify-content: space-between; padding-top: 11px; border-top: 1px solid var(--line); }
+    .account-foot span { color: var(--ink-3); font-size: 8px; }
+    .account-foot span.online { color: var(--green); }
+
+    .notification-region { position: fixed; z-index: 50; top: 18px; left: calc(50% + 119px); width: min(420px, calc(100vw - 40px)); transform: translateX(-50%); pointer-events: none; }
+    .notification { visibility: hidden; padding: 11px 14px; border: 1px solid var(--cyan-line); border-radius: 9px; color: var(--cyan-ink); background: rgb(242 248 249 / 97%); box-shadow: var(--shadow-small); opacity: 0; transform: translateY(-8px); transition: .18s ease; font-size: 10px; text-align: center; }
+    .notification.show { visibility: visible; opacity: 1; transform: translateY(0); }
+
+    .modal-layer { position: fixed; z-index: 40; inset: 0; display: grid; visibility: hidden; place-items: center; padding: 20px; background: rgb(25 31 26 / 28%); opacity: 0; transition: .18s; }
+    .modal-layer.open { visibility: visible; opacity: 1; }
+    .modal { width: min(470px, 100%); border-radius: 14px; background: #fff; box-shadow: var(--shadow); transform: translateY(8px) scale(.99); transition: .2s; }
+    .modal-layer.open .modal { transform: translateY(0) scale(1); }
+    .modal-head { display: flex; align-items: flex-start; gap: 15px; padding: 20px; border-bottom: 1px solid var(--line); }
+    .modal-head div { min-width: 0; flex: 1; }
+    .modal-head h2 { margin: 0; font-size: 17px; letter-spacing: -.025em; }
+    .modal-head p { margin: 5px 0 0; color: var(--ink-3); font-size: 9px; }
+    .modal-body { padding: 10px 20px 20px; }
+    .target-row { display: grid; grid-template-columns: 18px 28px 1fr auto; align-items: center; gap: 9px; min-height: 56px; border-bottom: 1px solid var(--line); }
+    .target-row input { accent-color: var(--pine); }
+    .target-row strong, .target-row small { display: block; }
+    .target-row strong { font-size: 10px; }
+    .target-row small { margin-top: 3px; color: var(--ink-3); font-size: 8px; }
+    .target-state { color: var(--green); font-size: 8px; }
+    .target-state.warn { color: var(--warn); }
+    .modal-note { margin-top: 14px; padding: 10px 11px; border-radius: 8px; color: var(--ink-2); background: var(--warn-soft); font-size: 8px; line-height: 1.6; }
+    .modal-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 13px 20px; border-top: 1px solid var(--line); }
+    .text-button { min-height: 35px; padding: 0 10px; border: 0; color: var(--ink-2); background: transparent; font-size: 9px; }
+
+    @media (max-width: 850px) {
+      body { overflow: auto; }
+      .app { display: block; height: auto; min-height: 100vh; }
+      .sidebar { position: fixed; z-index: 30; inset: 0 auto 0 0; width: min(260px, 86vw); box-shadow: 16px 0 45px rgb(32 45 36 / 15%); transform: translateX(-103%); transition: transform .2s ease; }
+      .sidebar.open { transform: translateX(0); }
+      .main { min-height: 100vh; }
+      .mobile-bar { display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+      .mobile-title { font-size: 11px; font-weight: 680; }
+      .editor-page, .management-page { width: calc(100% - 34px); padding-top: 28px; }
+      .notification-region { left: 50%; }
+      .management-head { align-items: flex-start; flex-direction: column; }
+      .management-tools { align-items: stretch; flex-wrap: wrap; }
+      .management-search { width: 100%; }
+      .profile-select { margin-left: 0; }
+      .management-row { grid-template-columns: minmax(0, 1fr) auto; }
+      .management-row .progress, .management-row .platforms { display: none; }
+    }
+
+    @media (max-width: 560px) {
+      .editor-page { width: calc(100% - 30px); }
+      .title-row { align-items: flex-start; flex-direction: column; gap: 6px; }
+      .topic-title { font-size: 27px; }
+      .variant-row { display: flex; overflow-x: auto; }
+      .variant-tab { flex: 0 0 128px; }
+      .add-variant { flex: 0 0 43px; }
+      .post-editor { min-height: 330px; font-size: 15px; }
+      .tool-button span { display: none; }
+      .settings-grid, .account-grid { grid-template-columns: 1fr; }
+      .publish-button { width: 100%; }
+      .publish-area { text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="话题与主导航">
+      <header class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+        <span class="brand-copy"><strong>Best Post</strong><small>Manager</small></span>
+      </header>
+
+      <div class="topic-heading" role="tablist" aria-label="话题操作">
+        <button class="topic-tab active" data-tab="create" role="tab" aria-selected="true">新建</button>
+        <button class="topic-tab" data-tab="profile" role="tab" aria-selected="false">Profile</button>
+        <button class="topic-tab" data-tab="search" role="tab" aria-selected="false">搜索</button>
+      </div>
+      <div class="topic-panel">
+        <div class="topic-panel-body" data-panel="create"><input id="newTopicInput" placeholder="新话题标题，回车创建" aria-label="新建话题标题"></div>
+        <div class="topic-panel-body hidden" data-panel="profile"><select id="sidebarProfile" aria-label="切换 Profile"><option>个人创作</option><option>产品账号</option></select></div>
+        <div class="topic-panel-body hidden" data-panel="search"><input id="sidebarSearchInput" placeholder="搜索标题" aria-label="搜索话题标题"></div>
+      </div>
+
+      <ul class="topic-list" id="sidebarTopics">
+        <li data-search="秋日城市漫游"><button class="topic-item active" data-title="秋日城市漫游"><strong>秋日城市漫游</strong><small>刚刚 · 2 / 3 已发布<span class="topic-dot green"></span></small></button></li>
+        <li data-search="产品更新 2.4"><button class="topic-item" data-title="产品更新 2.4"><strong>产品更新 2.4</strong><small>12 分钟前 · 1 项待确认<span class="topic-dot orange"></span></small></button></li>
+        <li data-search="九月内容计划"><button class="topic-item" data-title="九月内容计划"><strong>九月内容计划</strong><small>昨天 · 只有主稿<span class="topic-dot"></span></small></button></li>
+        <li data-search="为什么要做本地优先"><button class="topic-item" data-title="为什么要做本地优先"><strong>为什么要做本地优先</strong><small>9 月 2 日 · 3 / 3 已发布<span class="topic-dot green"></span></small></button></li>
+        <li data-search="一周阅读摘录"><button class="topic-item" data-title="一周阅读摘录"><strong>一周阅读摘录</strong><small>8 月 29 日 · 1 / 2 已发布<span class="topic-dot green"></span></small></button></li>
+      </ul>
+
+      <nav class="side-nav">
+        <button class="side-link" data-view="topics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5v10a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z"/></svg>管理话题</button>
+        <button class="side-link" data-view="publishing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v14H4z"/><path d="m8 10 2.5 2.5L16 7"/></svg>发布中心<span>2</span></button>
+        <button class="side-link" data-view="accounts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.6-4 3-6 7-6s6.4 2 7 6"/></svg>账号管理</button>
+        <button class="side-link" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.5V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>设置</button>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="mobile-bar"><button class="icon-button" id="mobileMenu" aria-label="打开导航"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><span class="mobile-title">Best Post</span><span style="width:30px"></span></header>
+
+      <article class="editor-page" id="editorView">
+        <header class="editor-head">
+          <div class="editor-head-main">
+            <div class="title-row"><input class="topic-title" id="topicTitle" value="秋日城市漫游" aria-label="话题标题"><span class="save-status" id="saveStatus"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 8 3 3 7-7"/></svg>已保存 · 刚刚</span></div>
+          </div>
+          <button class="icon-button more-button" aria-label="更多话题操作" title="更多话题操作"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
+        </header>
+
+        <section class="variant-section">
+          <div class="variant-row" role="tablist" aria-label="稿件版本">
+            <button class="variant-tab" data-doc="draft" role="tab"><span class="variant-copy"><span class="variant-title"><span class="variant-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 2.5h5L13 6v7.5H4.5Z"/><path d="M9.5 2.5V6H13M7 9.5h4M7 12h2.5"/></svg></span><strong>主稿</strong></span><small>内容源头</small></span><span class="variant-close" aria-hidden="true">×</span></button>
+            <button class="variant-tab active" data-doc="mastodon" role="tab"><span class="variant-copy"><span class="variant-title"><span class="variant-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path fill="currentColor" d="M4 6.8C4 4.9 5.8 3.5 8 3.5s4 1.4 4 3.3v1.7c0 2.2-1.4 3.5-2.9 4V14h-1v-1.4C6.2 12 4 10.7 4 8.5Z"/><path fill="currentColor" d="M12 7c1.3 0 2.2 1 2.2 2.2 0 1.2-.9 2.2-2.1 2.2h-.6v-1.2h.6c.5 0 .9-.4.9-.9s-.4-.9-.9-.9V7Z"/><circle cx="6.4" cy="6.9" r=".55" fill="#fff"/></svg></span><strong>Mastodon</strong></span><small class="ready">可以发布</small></span><span class="variant-close" aria-hidden="true">×</span></button>
+            <button class="variant-tab" data-doc="x" role="tab"><span class="variant-copy"><span class="variant-title"><span class="variant-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></svg></span><strong>X</strong></span><small class="warn">等待检查</small></span><span class="variant-close" aria-hidden="true">×</span></button>
+            <button class="variant-tab" data-doc="bluesky" role="tab"><span class="variant-copy"><span class="variant-title"><span class="variant-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path fill="currentColor" d="M8 13.9C8 9 4.9 4.2 2.9 4.2c-.9 0 .2 3.4 1.9 5.2 1.2 1.3 2.6 1.4 3.2 2.7.6-1.3 2-1.4 3.2-2.7 1.7-1.8 2.8-5.2 1.9-5.2-2 0-5.1 4.8-5.1 9.7Z"/></svg></span><strong>Bluesky</strong></span><small class="error">正文超限</small></span><span class="variant-close" aria-hidden="true">×</span></button>
+            <button class="add-variant" id="addVariant" aria-label="添加平台版本">＋</button>
+          </div>
+        </section>
+
+        <div class="editor-shell">
+        <div class="editor-paper">
+        <textarea class="post-editor" id="editor" spellcheck="true" aria-label="帖子正文">有些城市适合抵达，有些城市适合慢慢经过。
+
+这个周末，我沿着旧街区走了三个小时。没有攻略，也没有必须抵达的目的地，只在看见喜欢的转角时停下来。
+
+真正让旅行留在记忆里的，往往不是打卡清单，而是那些没有被安排的片刻。
+
+#城市漫游 #周末散步</textarea>
+        </div>
+        <div class="editor-tools">
+          <div class="tool-group">
+            <button class="tool-button" id="emojiTool"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></svg><span>Emoji</span></button>
+            <button class="tool-button" id="translateTool"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h7M7.5 3v2M5 8c1.4 2.7 3.5 4.6 6 5.7M10 7c-.8 3-2.8 5.6-6 7M13 20l4-10 4 10M14.5 17h5"/></svg><span>翻译</span></button>
+            <button class="tool-button" id="moreTool"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3v18M16 3v18M3 8h18M3 16h18"/></svg><span>更多</span></button>
+          </div>
+          <div class="tools-right"><button class="update-hint" id="updateFromSource">主稿已修改，点击更新</button><span class="counter" id="counter">113 字</span></div>
+        </div>
+        </div>
+
+        <section class="flow-section">
+          <div class="flow-head"><strong>媒体</strong><span>2 张 · 此版本使用通用媒体</span></div>
+          <div class="media-row">
+            <button class="media-item photo-one" aria-label="编辑第一张图片"><span class="media-label">替代文本已填写</span></button>
+            <button class="media-item photo-two" aria-label="编辑第二张图片"><span class="media-label missing">缺少替代文本</span></button>
+            <button class="add-media" id="addMedia" aria-label="添加图片"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></button>
+          </div>
+        </section>
+
+        <section class="flow-section" id="platformSettings">
+          <div class="flow-head"><strong>发布设置</strong><span id="channelText">Mastodon 官方 API</span></div>
+          <div class="settings-grid">
+            <div class="field"><label for="visibility">可见范围</label><select id="visibility"><option>公开</option><option>不公开</option><option>仅关注者</option></select></div>
+            <div class="field"><label for="contentWarning">内容警告</label><input id="contentWarning" placeholder="可选"></div>
+            <div class="relation-note"><span id="relationLabel">跟随主稿</span>主稿有修改时会提示你决定是否更新，不会自动覆盖。</div>
+          </div>
+        </section>
+
+        <section class="flow-section">
+          <div class="flow-head"><strong>发布前检查</strong><span>1 项建议</span></div>
+          <div class="check-panel">
+            <div class="check-row"><span class="check-mark">✓</span><span class="check-copy"><strong>正文与格式</strong><small id="textCheck">113 字，符合当前平台限制</small></span><span class="check-result">通过</span></div>
+            <div class="check-row"><span class="check-mark warn">!</span><span class="check-copy"><strong>图片替代文本</strong><small>第 2 张图片尚未填写</small></span><button class="edit-link" id="editAlt">去补充</button></div>
+            <div class="check-row"><span class="check-mark">✓</span><span class="check-copy"><strong>账号与发布通道</strong><small id="accountCheck">Mastodon @mori · 官方 API</small></span><span class="check-result">可用</span></div>
+          </div>
+          <div class="publish-area"><button class="publish-button" id="publishButton">检查并发布</button></div>
+        </section>
+      </article>
+
+      <section class="management-page hidden" id="topicsView">
+        <header class="management-head"><div><div class="breadcrumb">内容管理</div><h1>全部话题</h1><p>筛选、归档并查看每个话题的跨平台发布进度。</p></div><button class="primary-button" id="newTopicPage">＋ 新建话题</button></header>
+        <div class="management-tools"><label class="management-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg><input id="topicSearch" placeholder="搜索标题" aria-label="搜索全部话题"></label><button class="filter active">全部</button><button class="filter">进行中</button><button class="filter">需处理</button><button class="filter">已归档</button><select class="profile-select" aria-label="Profile"><option>个人创作</option><option>产品账号</option></select></div>
+        <ul class="management-list" id="allTopics">
+          <li class="management-row" data-search="秋日城市漫游"><div class="row-main"><strong>秋日城市漫游</strong><small>刚刚 · 进行中</small></div><div class="progress"><strong>2 / 3 已发布</strong><small>Bluesky 正文超限</small></div><div class="platforms"><span class="platform-badge masto">M</span><span class="platform-badge x">X</span><span class="platform-badge bsky">B</span></div><button class="row-action open-topic" data-title="秋日城市漫游">打开编辑</button></li>
+          <li class="management-row" data-search="产品更新 2.4"><div class="row-main"><strong>产品更新 2.4</strong><small>12 分钟前 · 进行中</small></div><div class="progress"><strong style="color:var(--warn)">1 项待确认</strong><small>X 浏览器桥接</small></div><div class="platforms"><span class="platform-badge masto">M</span><span class="platform-badge x">X</span></div><button class="row-action open-topic" data-title="产品更新 2.4">打开编辑</button></li>
+          <li class="management-row" data-search="九月内容计划"><div class="row-main"><strong>九月内容计划</strong><small>昨天 · 草稿</small></div><div class="progress"><strong>只有主稿</strong><small>尚未生成平台版本</small></div><div class="platforms"></div><button class="row-action open-topic" data-title="九月内容计划">打开编辑</button></li>
+          <li class="management-row" data-search="为什么要做本地优先"><div class="row-main"><strong>为什么要做本地优先</strong><small>9 月 2 日 · 已归档</small></div><div class="progress"><strong>3 / 3 已发布</strong><small>全部完成</small></div><div class="platforms"><span class="platform-badge masto">M</span><span class="platform-badge x">X</span><span class="platform-badge bsky">B</span></div><button class="row-action open-topic" data-title="为什么要做本地优先">打开编辑</button></li>
+        </ul>
+      </section>
+
+      <section class="management-page hidden" id="accountsView">
+        <header class="management-head"><div><div class="breadcrumb">连接管理</div><h1>账号</h1><p>管理 Profile 下的平台账号、凭据和连接诊断。</p></div><button class="primary-button" id="addAccount">＋ 连接账号</button></header>
+        <div class="management-tools"><button class="filter active">全部账号</button><button class="filter">官方 API</button><button class="filter">浏览器桥接</button><select class="profile-select"><option>个人创作</option><option>产品账号</option></select></div>
+        <div class="account-grid">
+          <article class="account-card"><div class="account-top"><span class="platform-badge masto">M</span><span><strong>Mastodon</strong><small>@mori@social.example</small></span></div><p>官方 API · 支持图片、内容警告和实例 Emoji。</p><footer class="account-foot"><span>尚未检测</span><button class="row-action">测试连接</button></footer></article>
+          <article class="account-card"><div class="account-top"><span class="platform-badge x">X</span><span><strong>X</strong><small>@mori</small></span></div><p>浏览器桥接 · 默认只填入，最终发布由你确认。</p><footer class="account-foot"><span class="online">桥接在线</span><button class="row-action">管理配对</button></footer></article>
+          <article class="account-card"><div class="account-top"><span class="platform-badge bsky">B</span><span><strong>Bluesky</strong><small>@mori.bsky.social</small></span></div><p>AT Protocol 官方接口 · 可测试账号身份和 PDS 连接。</p><footer class="account-foot"><span>尚未检测</span><button class="row-action">测试连接</button></footer></article>
+          <article class="account-card"><div class="account-top"><span class="platform-badge weibo">微</span><span><strong>微博</strong><small>@漫游手记</small></span></div><p>浏览器桥接 · 最终发布需要在平台页面人工完成。</p><footer class="account-foot"><span>未检测到页面</span><button class="row-action">管理配对</button></footer></article>
+        </div>
+      </section>
+
+      <section class="management-page hidden" id="publishingView"><header class="management-head"><div><div class="breadcrumb">发布管理</div><h1>发布中心</h1><p>优先处理待确认和可以安全重试的发布记录。</p></div></header><div class="management-tools"><button class="filter active">需处理 2</button><button class="filter">进行中</button><button class="filter">最近完成</button></div><ul class="management-list"><li class="management-row"><div class="row-main"><strong>产品更新 2.4</strong><small>X @mori · 浏览器桥接</small></div><div class="progress"><strong style="color:var(--warn)">等待确认结果</strong><small>今天 14:42</small></div><div></div><button class="row-action">确认结果</button></li><li class="management-row"><div class="row-main"><strong>周末活动预告</strong><small>Mastodon @studio · 官方 API</small></div><div class="progress"><strong style="color:var(--danger)">网络连接失败</strong><small>标记为可以安全重试</small></div><div></div><button class="row-action">查看并重试</button></li></ul></section>
+
+      <section class="management-page hidden" id="settingsView"><header class="management-head"><div><div class="breadcrumb">应用配置</div><h1>设置</h1><p>浏览器桥接、翻译服务和备份说明。</p></div></header><div class="account-grid"><article class="account-card"><div class="account-top"><span class="platform-badge" style="color:var(--cyan-ink);background:var(--cyan-soft)">译</span><span><strong>翻译服务</strong><small>1 个配置</small></span></div><p>管理 provider、模型和本地凭据引用。</p><footer class="account-foot"><span>OpenAI-compatible</span><button class="row-action">打开设置</button></footer></article><article class="account-card"><div class="account-top"><span class="platform-badge" style="color:var(--cyan-ink);background:var(--cyan-soft)">桥</span><span><strong>浏览器桥接</strong><small>2 个平台已配对</small></span></div><p>安装用户脚本，管理平台配对和撤销连接。</p><footer class="account-foot"><span class="online">1 个页面在线</span><button class="row-action">管理配对</button></footer></article><article class="account-card"><div class="account-top"><span class="platform-badge" style="color:var(--cyan-ink);background:var(--cyan-soft)">备</span><span><strong>备份与恢复</strong><small>通过 CLI 操作</small></span></div><p>查看现有备份与恢复命令和安全边界。</p><footer class="account-foot"><span>无备份历史字段</span><button class="row-action">查看说明</button></footer></article></div></section>
+    </main>
+  </div>
+
+  <div class="notification-region" aria-live="polite"><div class="notification" id="notification">操作完成</div></div>
+
+  <div class="modal-layer" id="publishModal" aria-hidden="true">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header class="modal-head"><div><h2 id="modalTitle">确认发布到 Mastodon</h2><p>这是发送到远端前的最后一步</p></div><button class="icon-button" id="closeModal" aria-label="关闭">×</button></header>
+      <div class="modal-body">
+        <label class="target-row"><input type="checkbox" checked><span class="platform-badge masto">M</span><span><strong>Mastodon @mori</strong><small>公开 · 2 张图片 · 官方 API</small></span><span class="target-state">可以发布</span></label>
+        <div class="modal-note">第 2 张图片没有替代文本。这不会阻止发布，但建议返回补充。</div>
+      </div>
+      <footer class="modal-foot"><button class="text-button" id="backToEdit">返回编辑</button><button class="primary-button" id="confirmPublish">确认发布</button></footer>
+    </section>
+  </div>
+
+  <script>
+    const documents = {
+      draft: { name: '主稿', hint: ' · 内容源头', relation: '内容源头', channel: '选择平台版本后设置', account: '尚未选择发布通道', button: '选择平台版本后发布', update: false, text: `有些城市适合抵达，有些城市适合慢慢经过。\n\n这个周末，我沿着旧街区走了三个小时。没有攻略，也没有必须抵达的目的地，只在看见喜欢的转角时停下来。\n\n真正让旅行留在记忆里的，往往不是打卡清单，而是那些没有被安排的片刻。` },
+      mastodon: { name: 'Mastodon · @mori', hint: ' · 纯文本 · 跟随主稿', relation: '跟随主稿', channel: 'Mastodon 官方 API', account: 'Mastodon @mori · 官方 API', button: '检查并发布到 Mastodon', update: false, text: `有些城市适合抵达，有些城市适合慢慢经过。\n\n这个周末，我沿着旧街区走了三个小时。没有攻略，也没有必须抵达的目的地，只在看见喜欢的转角时停下来。\n\n真正让旅行留在记忆里的，往往不是打卡清单，而是那些没有被安排的片刻。\n\n#城市漫游 #周末散步` },
+      x: { name: 'X · @mori', hint: ' · 纯文本 · 独立版本', relation: '独立版本', channel: '浏览器桥接 · 仅填入', account: 'X @mori · 桥接在线', button: '检查并发送到 X 页面', update: true, text: `有些城市适合抵达，有些城市适合慢慢经过。\n\n周末沿着旧街区走了三个小时，没有攻略，也没有目的地。真正留在记忆里的，往往是那些没有被安排的片刻。` },
+      bluesky: { name: 'Bluesky · @mori', hint: ' · 纯文本 · 跟随主稿', relation: '跟随主稿', channel: 'Bluesky AT Protocol', account: 'Bluesky @mori · 尚未检测连接', button: '修正正文后发布', update: true, text: `有些城市适合抵达，有些城市适合慢慢经过。这个周末，我沿着旧街区走了三个小时。没有攻略，也没有必须抵达的目的地，只在看见喜欢的转角时停下来。真正让旅行留在记忆里的，往往不是打卡清单，而是那些没有被安排的片刻。再加上一些还没有完成精简的补充说明。` }
+    };
+
+    const $ = selector => document.querySelector(selector);
+    const $$ = selector => [...document.querySelectorAll(selector)];
+    const views = { ditor: 'editorView', topics: 'topicsView', accounts: 'accountsView', publishing: 'publishingView', settings: 'settingsView' };
+    const editor = $('#editor');
+    let currentDocument = 'mastodon';
+    let saveTimer;
+    let noticeTimer;
+
+    function notify(message) {
+      const notice = $('#notification');
+      notice.textContent = message;
+      notice.classList.add('show');
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => notice.classList.remove('show'), 1800);
+    }
+
+    function showView(view) {
+      Object.entries(views).forEach(([name, id]) => $('#' + id).classList.toggle('hidden', name !== view));
+      $$('.side-link[data-view]').forEach(link => link.classList.toggle('active', link.dataset.view === view));
+      $('.main').scrollTop = 0;
+      $('#sidebar').classList.remove('open');
+    }
+
+    function updateCounter() {
+      const length = [...editor.value].length;
+      const limit = currentDocument === 'x' ? 280 : currentDocument === 'bluesky' ? 300 : null;
+      $('#counter').textContent = limit ? `${length} / ${limit} 字` : `${length} 字`;
+      $('#counter').classList.toggle('warn', Boolean(limit && length > limit * .88));
+      $('#textCheck').textContent = limit ? `${length} / ${limit} 字` : `${length} 字，符合当前平台限制`;
+    }
+
+    function switchDocument(id) {
+      if (!documents[id]) return;
+      documents[currentDocument].text = editor.value;
+      currentDocument = id;
+      const doc = documents[id];
+      $$('.variant-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.doc === id));
+      editor.value = doc.text;
+      $('#documentName').textContent = doc.name;
+      $('#documentHint').textContent = doc.hint;
+      $('#relationLabel').textContent = doc.relation;
+      $('#channelText').textContent = doc.channel;
+      $('#accountCheck').textContent = doc.account;
+      $('#publishButton').textContent = doc.button;
+      $('#sourceUpdate').classList.toggle('hidden', !doc.update);
+      $('#platformSettings').classList.toggle('hidden', id === 'draft');
+      $('#publishButton').disabled = id === 'draft' || id === 'bluesky';
+      updateCounter();
+    }
+
+    $$('.variant-tab').forEach(tab => tab.addEventListener('click', () => switchDocument(tab.dataset.doc)));
+    $$('.side-link[data-view]').forEach(link => link.addEventListener('click', () => showView(link.dataset.view)));
+    $$('.topic-item').forEach(item => item.addEventListener('click', () => {
+      $$('.topic-item').forEach(other => other.classList.remove('active'));
+      item.classList.add('active');
+      $('#topicTitle').value = item.dataset.title;
+      showView('editor');
+      notify(`已打开“${item.dataset.title}”`);
+    }));
+    $$('.open-topic').forEach(button => button.addEventListener('click', () => { $('#topicTitle').value = button.dataset.title; showView('editor'); notify(`已打开“${button.dataset.title}”`); }));
+
+    $$('.topic-tab').forEach(tab => tab.addEventListener('click', () => {
+      $$('.topic-tab').forEach(other => { other.classList.toggle('active', other === tab); other.setAttribute('aria-selected', String(other === tab)); });
+      $$('.topic-panel-body').forEach(body => body.classList.toggle('hidden', body.dataset.panel !== tab.dataset.tab));
+      if (tab.dataset.tab === 'create') $('#newTopicInput').focus();
+      if (tab.dataset.tab === 'search') $('#sidebarSearchInput').focus();
+    }));
+    $('#newTopicInput').addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.value.trim()) { notify('这里将创建话题并进入主稿'); event.target.value = ''; } });
+    $('#sidebarSearchInput').addEventListener('input', event => { const query = event.target.value.trim().toLowerCase(); $$('#sidebarTopics > li').forEach(item => item.hidden = !item.dataset.search.toLowerCase().includes(query)); });
+    $('#topicSearch').addEventListener('input', event => { const query = event.target.value.trim().toLowerCase(); $$('#allTopics > li').forEach(item => item.hidden = !item.dataset.search.toLowerCase().includes(query)); });
+    $$('.management-tools').forEach(group => group.querySelectorAll('.filter').forEach(button => button.addEventListener('click', () => { group.querySelectorAll('.filter').forEach(other => other.classList.remove('active')); button.classList.add('active'); })));
+
+    function markSaving() {
+      $('#saveStatus').textContent = '正在保存…';
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => { $('#saveStatus').innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 8 3 3 7-7"/></svg>已保存 · 刚刚'; }, 700);
+    }
+    editor.addEventListener('input', () => { documents[currentDocument].text = editor.value; updateCounter(); markSaving(); });
+    $('#topicTitle').addEventListener('input', markSaving);
+
+    function openModal() { if ($('#publishButton').disabled) return; $('#publishModal').classList.add('open'); $('#publishModal').setAttribute('aria-hidden', 'false'); setTimeout(() => $('#closeModal').focus(), 80); }
+    function closeModal() { $('#publishModal').classList.remove('open'); $('#publishModal').setAttribute('aria-hidden', 'true'); }
+    $('#publishButton').addEventListener('click', openModal);
+    $('#closeModal').addEventListener('click', closeModal);
+    $('#backToEdit').addEventListener('click', closeModal);
+    $('#publishModal').addEventListener('click', event => { if (event.target === $('#publishModal')) closeModal(); });
+    $('#confirmPublish').addEventListener('click', () => { closeModal(); notify('视觉原型：发布任务已创建'); });
+
+    $('#sidebarProfile').addEventListener('change', () => notify(`已切换 Profile：${$('#sidebarProfile').value}`));
+    $('#newTopicPage').addEventListener('click', () => notify('这里将创建话题并进入主稿'));
+    $('#addAccount').addEventListener('click', () => notify('这里将打开账号连接流程'));
+    $('#addVariant').addEventListener('click', () => notify('这里将选择账号并生成平台版本'));
+    $('#manageVariants').addEventListener('click', () => notify('这里将管理、复制或移除平台版本'));
+    $('#sourceUpdate').addEventListener('click', () => notify('这里将显示主稿差异'));
+    $('#emojiTool').addEventListener('click', () => notify('这里将打开当前实例 Emoji'));
+    $('#translateTool').addEventListener('click', () => notify('这里将创建独立翻译版本'));
+    $('#moreTool').addEventListener('click', () => notify('更多：导入、关联站外帖子'));
+    $('#addMedia').addEventListener('click', () => notify('这里将打开本地图片选择器'));
+    $('#editAlt').addEventListener('click', () => notify('这里将聚焦第 2 张图片的替代文本'));
+    $('#mobileMenu').addEventListener('click', () => $('#sidebar').classList.add('open'));
+
+    document.addEventListener('keydown', event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); openModal(); }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); clearTimeout(saveTimer); $('#saveStatus').innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 8 3 3 7-7"/></svg>已保存 · 刚刚'; }
+      if (event.key === 'Escape') { closeModal(); $('#sidebar').classList.remove('open'); }
+    });
+
+    switchDocument('mastodon');
+  </script>
+</body>
+</html>
