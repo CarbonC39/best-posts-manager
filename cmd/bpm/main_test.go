@@ -28,7 +28,7 @@ func TestWebHandlerServesHistoryRoutesAndKeepsAssetsStrict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/", "/topics", "/topics/topic-1", "/history", "/settings"} {
+	for _, path := range []string{"/", "/topics", "/topics/topic-1", "/accounts", "/history", "/publishing", "/settings"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil))
 		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "app shell") {

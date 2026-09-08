@@ -195,7 +195,7 @@ func newWebHandler(static fs.FS) (http.Handler, error) {
 	}
 	staticHandler := http.FileServer(http.FS(static))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && (r.URL.Path == "/" || r.URL.Path == "/topics" || strings.HasPrefix(r.URL.Path, "/topics/") || r.URL.Path == "/history" || r.URL.Path == "/settings") {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && (r.URL.Path == "/" || r.URL.Path == "/topics" || strings.HasPrefix(r.URL.Path, "/topics/") || r.URL.Path == "/accounts" || r.URL.Path == "/history" || r.URL.Path == "/publishing" || r.URL.Path == "/settings") {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(indexHTML))
 			return

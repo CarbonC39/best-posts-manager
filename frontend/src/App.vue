@@ -4,6 +4,7 @@ import { api } from './api'
 import { canAutoPublish } from './bridgeAdapters'
 import PublicationList from './PublicationList.vue'
 import IconButton from './IconButton.vue'
+import PlatformIcon from './PlatformIcon.vue'
 
 type Profile = { id: string; name: string }
 type Account = { id: string; profile_id: string; platform: string; name: string; remote_id: string; base_url?: string; token_env?: string; disabled?: boolean }
@@ -100,10 +101,24 @@ const topicTitleEdit = ref('')
 const externalImportAccountID = ref('')
 const variantBaselines = ref<Record<string, string>>({})
 const busyVariantIDs = ref<Set<string>>(new Set())
+const topicSearch = ref('')
+const sidebarTool = ref<'create' | 'profile' | 'search'>('create')
+const showTargetAdd = ref(false)
+const editorTool = ref<'' | 'emoji' | 'translation' | 'external'>('')
+const mediaDialogOpen = ref(false)
+const publishDialogOpen = ref(false)
+const publishDialogBusy = ref(false)
+const bridgeAutoPublish = ref(false)
+const publishDialogEl = ref<HTMLElement | null>(null)
+let publishDialogReturnFocus: HTMLElement | null = null
+const saveState = ref<'idle' | 'saving' | 'error'>('idle')
+const editorReady = ref(false)
+const suppressAutosave = ref(false)
+let saveTimer: number | undefined
 const baseURLPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'Bluesky PDS URL' : '平台实例 URL')
 const tokenEnvPlaceholder = computed(() => accountPlatform.value === 'bluesky' ? 'app password 环境变量名' : 'token 环境变量名')
 const platformDescription = computed(() => ({
-  mastodon: 'Mastodon-compatible：推荐 OAuth 自动连接；也可手动保存 access token，或使用环境变量。',
+  mastodon: 'Mastodon：推荐 OAuth 自动连接；也可手动保存 access token，或使用环境变量。',
   misskey: 'Misskey：推荐 MiAuth 自动连接；也可手动保存 access token，或使用环境变量。',
   bluesky: 'Bluesky：填写 handle/identifier、PDS（默认 https://bsky.social）与 app password。app password 可直接保存在本机凭据文件，也可使用环境变量。',
   x: 'X：使用浏览器桥接；默认只填入，纯文本可对单次请求确认自动发布。',
@@ -121,6 +136,10 @@ const translationProviderDescription = computed(() => ({
 const profileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value && !account.disabled))
 const disabledProfileAccounts = computed(() => accounts.value.filter((account) => account.profile_id === selectedProfileID.value && account.disabled))
 const profileTopics = computed(() => topics.value.filter((topic) => topic.profile_id === selectedProfileID.value && (showArchivedTopics.value || topic.status === 'active')))
+const visibleTopics = computed(() => {
+  const query = topicSearch.value.trim().toLowerCase()
+  return query ? profileTopics.value.filter((topic) => topic.title.toLowerCase().includes(query)) : profileTopics.value
+})
 const editableVariants = computed(() => variants.value.filter((variant) => !variant.published))
 const selectedAccount = computed(() => accounts.value.find((account) => account.id === selectedAccountID.value))
 const filteredVariants = computed(() => {
@@ -129,6 +148,7 @@ const filteredVariants = computed(() => {
   return variants.value.filter((variant) => variantAccountLabel(variant).toLowerCase().includes(query) || variantFormatLabel(variant).toLowerCase().includes(query) || variantStatusLabel(variant).toLowerCase().includes(query) || variant.text.toLowerCase().includes(query))
 })
 const activeVariant = computed(() => {
+  if (activeVariantID.value === 'draft') return undefined
   const query = variantSearch.value.trim()
   return query ? filteredVariants.value.find((variant) => variant.id === activeVariantID.value) || filteredVariants.value[0] : variants.value.find((variant) => variant.id === activeVariantID.value) || variants.value[0]
 })
@@ -154,6 +174,33 @@ function variantDirty(variant: Variant) {
 const draftDirty = computed(() => Boolean(draft.value && text.value !== draft.value.text))
 const topicTitleDirty = computed(() => Boolean(selected.value && topicTitleEdit.value !== selected.value.title))
 const hasUnsavedChanges = computed(() => topicTitleDirty.value || draftDirty.value || variants.value.some(variantDirty))
+const editorText = computed({
+  get: () => activeVariant.value ? (activeVariant.value.text || '') : (text.value || ''),
+  set: (value: string) => { if (activeVariant.value) activeVariant.value.text = value; else text.value = value },
+})
+const currentMedia = computed(() => media.value.filter((item) => !item.variant_id || item.variant_id === activeVariant.value?.id))
+const preflightChecks = computed(() => {
+  const variant = activeVariant.value
+  const account = variant ? variantAccount(variant) : selectedAccount.value
+  const capability = variant ? variantCapability(variant) : account ? capabilities.value[account.id] : undefined
+  const content = variant?.text || editorText.value || ''
+  const checks: Array<{ tone: string; title: string; detail: string; result: string }> = []
+  if (!account) return checks
+  const contentBytes = utf8Bytes(content)
+  if (capability?.text_max_bytes && contentBytes > capability.text_max_bytes) checks.push({ tone: 'error', title: '正文与格式', detail: `超过 ${capability.text_max_bytes} bytes 上限 ${contentBytes - capability.text_max_bytes} bytes`, result: '需修改' })
+  else checks.push({ tone: 'ok', title: '正文与格式', detail: capability?.text_max_bytes ? `${content.length} 字符 · ${contentBytes}/${capability.text_max_bytes} bytes` : `${content.length} 字符`, result: '通过' })
+  if (capability?.max_media && currentMedia.value.length > capability.max_media) checks.push({ tone: 'error', title: '媒体', detail: `最多 ${capability.max_media} 张，当前 ${currentMedia.value.length} 张`, result: '需修改' })
+  else if (currentMedia.value.some((item) => !String(item.alt_text || '').trim())) checks.push({ tone: 'warning', title: '图片替代文本', detail: '有媒体尚未填写替代文本', result: '建议补充' })
+  else checks.push({ tone: 'ok', title: '媒体', detail: currentMedia.value.length ? `${currentMedia.value.length} 张图片` : '未添加图片', result: '通过' })
+  if (account.disabled) checks.push({ tone: 'error', title: '发布账号', detail: `${platformLabel(account.platform)} · ${account.name}`, result: '已停用' })
+  else checks.push({ tone: 'ok', title: '发布账号', detail: `${platformLabel(account.platform)} · ${account.name}`, result: '可用' })
+  return checks
+})
+const preflightBlocking = computed(() => preflightChecks.value.some((check) => check.tone === 'error'))
+const preflightSummary = computed(() => {
+  const issues = preflightChecks.value.filter((check) => check.tone !== 'ok').length
+  return issues ? `${issues} 项${preflightBlocking.value ? '需处理' : '建议'}` : '全部通过'
+})
 function variantBusy(variant: Variant) { return busyVariantIDs.value.has(variant.id) }
 function diagnosticIsBusy(account: Account) { return diagnosticBusy.value.has(account.id) }
 function setDiagnosticBusy(account: Account, busy: boolean) {
@@ -203,8 +250,8 @@ function isBridgePlatform(platform: string) {
   return ['x', 'weibo', 'xiaohongshu', 'qzone'].includes(platform)
 }
 
-function variantCapability(variant: Variant) {
-  return capabilities.value[variant.account_id]
+function variantCapability(variant?: Variant) {
+  return variant ? capabilities.value[variant.account_id] : undefined
 }
 
 function variantAccount(variant: Variant) {
@@ -213,16 +260,48 @@ function variantAccount(variant: Variant) {
 
 function variantAccountLabel(variant: Variant) {
   const account = variantAccount(variant)
-  return account ? `${account.name} · ${account.platform}` : variant.account_id
+  return account ? `${account.name} · ${platformLabel(account.platform)}` : variant.account_id
 }
 function selectVariant(variant: Variant) {
   activeVariantID.value = variant.id
   emojiTargetAccountID.value = variant.account_id
   translationSourceID.value = variant.id
 }
+async function selectDocument(id: string) {
+  suppressAutosave.value = true
+  try {
+    await flushAutoSave()
+    activeVariantID.value = id
+    editorTool.value = ''
+    if (id !== 'draft') {
+      const variant = variants.value.find((item) => item.id === id)
+      if (variant) { emojiTargetAccountID.value = variant.account_id; translationSourceID.value = variant.id }
+    }
+    await nextTick()
+  } finally { suppressAutosave.value = false }
+}
+async function selectDraft() { await selectDocument('draft') }
+function toggleEditorTool(tool: 'emoji' | 'translation' | 'external') {
+  editorTool.value = editorTool.value === tool ? '' : tool
+  if (tool === 'translation' && activeVariant.value) translationSourceID.value = activeVariant.value.id
+}
 function variantFormatLabel(variant: Variant) { return variant.format === 'mfm' ? 'MFM' : '纯文本' }
-function variantRelationLabel(variant: Variant) { return variant.relation === 'linked' ? '跟随基础稿' : '独立版本' }
+function variantRelationLabel(variant: Variant) { return variant.relation === 'linked' ? '跟随主稿' : '独立版本' }
 function variantStatusLabel(variant: Variant) { return variant.published ? '已有发布记录' : variant.status === 'ready' ? '可发布' : '草稿' }
+function platformLabel(platform?: string) {
+  return ({ mastodon: 'Mastodon', 'mastodon-compatible': 'Mastodon', misskey: 'Misskey', bluesky: 'Bluesky', x: 'X', weibo: '微博', xiaohongshu: '小红书', qzone: 'QQ 空间' } as Record<string, string>)[platform || ''] || platform || '平台'
+}
+function variantTabLabel(variant: Variant) {
+  const account = variantAccount(variant)
+  return account?.name || platformLabel(account?.platform)
+}
+function topicProgress(topic: Topic) {
+  if (selected.value?.id === topic.id) {
+    const published = variants.value.filter((variant) => variant.published).length
+    return variants.value.length ? `${published}/${variants.value.length} 已发布` : '尚未添加目标'
+  }
+  return topic.status === 'archived' ? '已归档' : '进行中'
+}
 function mediaScopeLabel(item: Media) {
   if (!item.variant_id) return '所有平台版本'
   const variant = variants.value.find((candidate) => candidate.id === item.variant_id)
@@ -254,6 +333,7 @@ watch(emojiTargetAccountID, (accountID) => {
   }
 })
 watch(filteredVariants, (items) => {
+  if (activeVariantID.value === 'draft') return
   if (!items.some((variant) => variant.id === activeVariantID.value)) activeVariantID.value = items[0]?.id || variants.value[0]?.id || ''
 })
 
@@ -263,11 +343,12 @@ function routeState() {
   if (topicMatch) {
     try { return { section: 'editor', topicID: decodeURIComponent(topicMatch[1]) } } catch { return { section: 'topics', topicID: '' } }
   }
-  if (path === '/history') return { section: 'history', topicID: '' }
-  if (path === '/settings') return { section: 'settings', topicID: '' }
+  if (path === '/history' || path === '/publishing') return { section: 'history', topicID: '' }
+  if (path === '/accounts') return { section: 'accounts', topicID: '' }
+  if (path === '/settings' || path === '/settings/integrations' || path === '/settings/data') return { section: 'settings', topicID: '' }
   return { section: 'topics', topicID: '' }
 }
-function routePath(next: string) { return next === 'history' ? '/history' : next === 'settings' ? '/settings' : next === 'editor' && selected.value ? `/topics/${encodeURIComponent(selected.value.id)}` : '/topics' }
+function routePath(next: string) { return next === 'history' ? '/history' : next === 'accounts' ? '/accounts' : next === 'settings' ? '/settings' : next === 'editor' && selected.value ? `/topics/${encodeURIComponent(selected.value.id)}` : '/topics' }
 function goSection(next: string, replace = false) {
   if (section.value === 'editor' && next !== 'editor' && hasUnsavedChanges.value && !window.confirm('还有未保存的稿件修改，确定离开并丢弃这些修改吗？')) return
   if (next === 'editor' && !selected.value) { next = 'topics' }
@@ -403,7 +484,7 @@ async function diagnoseMastodon(account: Account) {
     const result = await api<MastodonDiagnostic>(`accounts/${account.id}/diagnostic`, { method: 'POST' })
     mastodonDiagnostic.value[account.id] = result
     connectionMessage.value = result.ok
-      ? `${result.category ? 'Mastodon 检测完成（有警告）' : 'Mastodon 连接成功'}：@${result.username || account.name}（${result.elapsed_ms} ms）${result.hint ? `。${result.hint}` : ''}`
+      ? `${result.category ? 'Mastodon 检测完成（有警告）' : 'Mastodon 连接成功'}：@${result.username || account.name}（${result.elapsed_ms} ms）${result.hint ? `。${result.hint}` : ''}${result.status_write?.message ? ` · ${result.status_write.message}` : ''}${result.media_write?.message ? ` · ${result.media_write.message}` : ''}`
       : `Mastodon 连接失败［${result.stage}/${result.category || 'unknown'}］：${result.message}${result.hint ? `。建议：${result.hint}` : ''}`
   } catch (error) {
     connectionMessage.value = `Mastodon 诊断请求失败：${error instanceof Error ? error.message : String(error)}。请查看 bpm 进程日志。`
@@ -455,7 +536,7 @@ async function setTopicStatus(topic: Topic, status: 'active' | 'archived') {
   } catch (error) { showError(error) }
 }
 
-async function renameSelectedTopic() {
+async function renameSelectedTopic(silent = false) {
   if (!selected.value) return
   if (!topicTitleEdit.value.trim()) { message.value = '话题标题不能为空'; return }
   try {
@@ -464,12 +545,14 @@ async function renameSelectedTopic() {
     const listed = topics.value.find((topic) => topic.id === updated.id)
     if (listed) Object.assign(listed, updated)
     topicTitleEdit.value = updated.title
-    message.value = '话题标题已更新'
-  } catch (error) { showError(error) }
+    return true
+  } catch (error) { if (!silent) showError(error); return false }
 }
 
 async function openTopic(topic: Topic) {
   try {
+    suppressAutosave.value = true
+    editorReady.value = false
     selected.value = topic
     selectedProfileID.value = topic.profile_id
     const loaded = await Promise.all([
@@ -481,7 +564,7 @@ async function openTopic(topic: Topic) {
     topicTitleEdit.value = topic.title
     mediaVariantID.value = ''
     variantSearch.value = ''
-    activeVariantID.value = variants.value[0]?.id || ''
+    activeVariantID.value = 'draft'
     emojis.value = []
     emojiLoadedAccountID.value = ''
     emojiTargetAccountID.value = variants.value.find((variant) => variant.id === activeVariantID.value && variantCapability(variant)?.custom_emoji)?.account_id || variants.value.find((variant) => variantCapability(variant)?.custom_emoji)?.account_id || ''
@@ -492,10 +575,13 @@ async function openTopic(topic: Topic) {
     externalImportAccountID.value = profileAccounts.value.find((account) => account.platform === 'misskey' || account.platform === 'bluesky')?.id || ''
     section.value = 'editor'
     if (window.location.pathname !== `/topics/${encodeURIComponent(topic.id)}`) window.history.pushState({}, '', `/topics/${encodeURIComponent(topic.id)}`)
+    editorReady.value = true
+    await nextTick()
+    suppressAutosave.value = false
   } catch (error) { showError(error) }
 }
 
-async function persistDraft(announce: boolean) {
+async function persistDraft(announce: boolean, silent = false) {
   if (!selected.value) return false
   try {
     const changed = draftDirty.value
@@ -503,9 +589,95 @@ async function persistDraft(announce: boolean) {
     if (changed) variants.value.forEach((variant) => { if (variant.relation === 'linked' && !variant.published) variant.outdated = true })
     if (announce) message.value = '基础稿已保存'
     return true
-  } catch (error) { showError(error); return false }
+  } catch (error) { if (!silent) showError(error); return false }
 }
-async function saveDraft() { await persistDraft(true) }
+async function saveDraft() { await flushAutoSave() }
+
+async function flushAutoSave() {
+  if (!editorReady.value || !selected.value) return
+  const needsDraft = draftDirty.value
+  const needsTitle = topicTitleDirty.value
+  const current = activeVariant.value
+  const needsVariant = Boolean(current && variantDirty(current))
+  if (!needsDraft && !needsTitle && !needsVariant) { saveState.value = 'idle'; return }
+  if (saveTimer !== undefined) { window.clearTimeout(saveTimer); saveTimer = undefined }
+  saveState.value = 'saving'
+  try {
+    if (needsTitle && !await renameSelectedTopic(true)) throw new Error('title save failed')
+    if (needsDraft && !await persistDraft(false, true)) throw new Error('draft save failed')
+    if (current && variantDirty(current) && !await saveVariant(current, false, true)) throw new Error('variant save failed')
+    saveState.value = 'idle'
+  } catch {
+    saveState.value = 'error'
+  }
+}
+function scheduleAutoSave() {
+  if (!editorReady.value || suppressAutosave.value) return
+  saveState.value = 'saving'
+  if (saveTimer !== undefined) window.clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(() => { saveTimer = undefined; void flushAutoSave() }, 700)
+}
+watch([topicTitleEdit, editorText], scheduleAutoSave)
+
+async function openPublishDialog() {
+  if (!activeVariant.value) {
+    if (!selected.value || !selectedAccountID.value) { message.value = '请先选择目标账号'; return }
+    if (draftDirty.value && !await persistDraft(false)) return
+    try {
+      const created = await api<Variant>('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: selectedAccountID.value }) })
+      variants.value.push(created)
+      variantBaselines.value[created.id] = variantSignature(created)
+      activeVariantID.value = created.id
+      await nextTick()
+    } catch (error) { showError(error); return }
+  }
+  if (activeVariant.value.published) {
+    message.value = '这个版本已有发布记录，请复制为新版本后再发布'
+    return
+  }
+  if (draftDirty.value && !await persistDraft(false)) return
+  if (variantDirty(activeVariant.value) && !await saveVariant(activeVariant.value, false)) return
+  publishDialogReturnFocus = document.activeElement as HTMLElement | null
+  bridgeAutoPublish.value = false
+  publishDialogOpen.value = true
+  await nextTick()
+  publishDialogEl.value?.querySelector<HTMLElement>('button, [tabindex="0"]')?.focus()
+}
+function closePublishDialog() {
+  publishDialogOpen.value = false
+  nextTick(() => publishDialogReturnFocus?.focus())
+}
+function onDialogKeydown(event: KeyboardEvent) {
+  if (mediaDialogOpen.value && event.key === 'Escape') { event.preventDefault(); mediaDialogOpen.value = false; return }
+  if (!publishDialogOpen.value) {
+    if (section.value !== 'editor' || (!event.metaKey && !event.ctrlKey)) return
+    if (event.key.toLowerCase() === 's') { event.preventDefault(); void flushAutoSave() }
+    else if (event.key === 'Enter') { event.preventDefault(); void openPublishDialog() }
+    return
+  }
+  if (event.key === 'Escape') { event.preventDefault(); closePublishDialog(); return }
+  if (event.key !== 'Tab') return
+  const dialog = publishDialogEl.value
+  if (!dialog) return
+  const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'))
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+}
+async function confirmPublish() {
+  if (!activeVariant.value || publishDialogBusy.value) return
+  publishDialogBusy.value = true
+  try {
+    const account = variantAccount(activeVariant.value)
+    if (isBridgePlatform(account?.platform || '')) await fillBrowser(activeVariant.value, bridgeAutoPublish.value)
+    else await publish(activeVariant.value)
+    closePublishDialog()
+  } finally {
+    publishDialogBusy.value = false
+  }
+}
 
 async function newVariant() {
   if (!selected.value) return
@@ -513,11 +685,12 @@ async function newVariant() {
   if (draftDirty.value && !await persistDraft(false)) return
   if (!await saveAllDirtyVariants()) return
   try {
-    await api('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: selectedAccountID.value }) })
-    variants.value = listOrEmpty(await api<Variant[]>(`variants?topic_id=${selected.value.id}`))
-    rememberVariants(variants.value)
+    const created = await api<Variant>('variants', { method: 'POST', body: JSON.stringify({ topic_id: selected.value.id, account_id: selectedAccountID.value }) })
+    variants.value.push(created)
+    variantBaselines.value[created.id] = variantSignature(created)
     variantSearch.value = ''
-    activeVariantID.value = variants.value[variants.value.length - 1]?.id || activeVariantID.value
+    activeVariantID.value = created.id
+    showTargetAdd.value = false
     emojiTargetAccountID.value = selectedAccountID.value
     translationSourceID.value ||= variants.value[0]?.id || ''
     message.value = '平台版本已生成'
@@ -545,13 +718,13 @@ async function publishFromDraft() {
   finally { draftPublishBusy.value = false }
 }
 
-async function saveVariant(variant: Variant, announce = true) {
+async function saveVariant(variant: Variant, announce = true, silent = false) {
   try {
     Object.assign(variant, await api<Variant>(`variants/${variant.id}`, { method: 'PUT', body: JSON.stringify(variant) }))
     variantBaselines.value[variant.id] = variantSignature(variant)
     if (announce) message.value = '平台版本已保存并与基础稿分离'
     return true
-  } catch (error) { showError(error); return false }
+  } catch (error) { if (!silent) showError(error); return false }
 }
 async function saveAllDirtyVariants() {
   for (const variant of variants.value) {
@@ -609,7 +782,7 @@ async function markExternal() {
     message.value = '已标记站外 URL'
   } catch (error) { showError(error) }
 }
-async function importExternal() { if (!selected.value) return; if (!externalImportAccountID.value || !externalReference.value.trim()) { message.value='请选择导入账号并填写帖子 ID/URL'; return }; try { const post=await api<ExternalPost>('external-posts/import',{method:'POST',body:JSON.stringify({topic_id:selected.value.id,account_id:externalImportAccountID.value,reference:externalReference.value})});externalPosts.value.unshift(post);externalReference.value='';message.value='已通过官方 API 导入快照'} catch(error){showError(error)} }
+async function importExternal() { if (!selected.value) return; if (!externalImportAccountID.value || !externalReference.value.trim()) { message.value='请选择导入账号并填写帖子 ID/URL'; return }; try { const post=await api<ExternalPost>('external-posts/import',{method:'POST',body:JSON.stringify({topic_id:selected.value.id,account_id:externalImportAccountID.value,reference:externalReference.value})});externalPosts.value.unshift(post);externalReference.value='';message.value='已导入快照'} catch(error){showError(error)} }
 async function deleteExternalPost(post: ExternalPost) {
   if (!window.confirm(`移除这条 ${post.platform} 站外关联？只删除本地记录，不会操作远端帖子。`)) return
   try {
@@ -631,7 +804,7 @@ async function uploadMedia(event: Event) {
     const response = await fetch('/api/media', { method: 'POST', body: form })
     const body = await response.json()
     if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
-    media.value.push(body); altText.value = ''; input.value = ''
+    media.value.push(body); altText.value = ''; input.value = ''; mediaDialogOpen.value = false
     message.value = '图片已保存'
   } catch (error) { showError(error) }
 }
@@ -799,6 +972,7 @@ async function refreshBridgeState() { await syncBridgeState(true) }
 onMounted(async () => {
   window.addEventListener('beforeunload', warnBeforeUnload)
   window.addEventListener('popstate', onPopState)
+  window.addEventListener('keydown', onDialogKeydown)
   await load()
   await applyBrowserRoute()
   const params = new URLSearchParams(window.location.search)
@@ -815,73 +989,90 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', warnBeforeUnload)
   window.removeEventListener('popstate', onPopState)
+  window.removeEventListener('keydown', onDialogKeydown)
   if (bridgeRefreshTimer !== undefined) window.clearInterval(bridgeRefreshTimer)
   if (toastTimer !== undefined) window.clearTimeout(toastTimer)
+  if (saveTimer !== undefined) window.clearTimeout(saveTimer)
 })
 </script>
 
 <template>
   <div class="shell">
-    <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">↗</span><div><strong>Best Post</strong><small>Manager</small></div></div>
-      <nav aria-label="主导航">
-        <a class="nav-link" :class="{active:section==='topics'}" href="/topics" @click="followSectionLink($event, 'topics')"><span>⌂</span> 内容</a>
-        <a class="nav-link" :class="{active:section==='editor'}" :href="routePath('editor')" @click="followSectionLink($event, 'editor')"><span>✎</span> 当前编辑</a>
-        <a class="nav-link" :class="{active:section==='history'}" href="/history" @click="followSectionLink($event, 'history')"><span>↗</span> 发布记录</a>
-        <a class="nav-link" :class="{active:section==='settings'}" href="/settings" @click="followSectionLink($event, 'settings')"><span>⚙</span> 设置</a>
+    <aside class="sidebar" aria-label="工作区导航">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M4 16 16 4M7 4h9v9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></span><div><strong>Best Post</strong><small>Manager</small></div></div>
+      <div class="topic-heading" role="tablist" aria-label="话题操作"><button type="button" class="topic-tab" :class="{active:sidebarTool==='create'}" role="tab" :aria-selected="sidebarTool==='create'" @click="sidebarTool='create'">新建</button><button type="button" class="topic-tab" :class="{active:sidebarTool==='profile'}" role="tab" :aria-selected="sidebarTool==='profile'" @click="sidebarTool='profile'">Profile</button><button type="button" class="topic-tab" :class="{active:sidebarTool==='search'}" role="tab" :aria-selected="sidebarTool==='search'" @click="sidebarTool='search'">搜索</button></div>
+      <div class="topic-panel"><form v-show="sidebarTool==='create'" class="topic-panel-body" @submit.prevent="addTopic"><input v-model="topicTitle" placeholder="新话题标题，回车创建" aria-label="新建话题标题" :disabled="!selectedProfileID"></form><div v-show="sidebarTool==='profile'" class="topic-panel-body"><select class="profile-select" v-model="selectedProfileID" aria-label="Profile"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select></div><div v-show="sidebarTool==='search'" class="topic-panel-body"><input v-model="topicSearch" aria-label="搜索话题标题" placeholder="搜索标题"></div></div>
+      <ul class="quick-topics" aria-label="最近话题"><li v-for="topic in visibleTopics.slice(0, 8)" :key="topic.id"><a :class="{active:selected?.id===topic.id}" :href="`/topics/${encodeURIComponent(topic.id)}`" @click="followTopicLink($event, topic)"><strong>{{topic.title}}</strong><small>{{topicProgress(topic)}}</small></a></li><li v-if="!visibleTopics.length" class="quick-empty">暂无话题</li></ul>
+      <nav aria-label="主导航" class="primary-nav">
+        <a class="nav-link" :class="{active:section==='topics'}" href="/topics" @click="followSectionLink($event, 'topics')"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="m3 9 7-6 7 6v7a1 1 0 0 1-1 1h-4v-5H8v5H4a1 1 0 0 1-1-1V9Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg></span> 管理话题<span class="sr-only">内容</span></a>
+        <a class="nav-link" :class="{active:section==='history'}" href="/history" @click="followSectionLink($event, 'history')"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M4 5h12v11H4zM7 3v4M13 3v4M4 9h12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span> 发布中心</a>
+        <a class="nav-link" :class="{active:section==='accounts'}" href="/accounts" @click="followSectionLink($event, 'accounts')"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="10" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4.5 17c.7-3 2.5-4.5 5.5-4.5s4.8 1.5 5.5 4.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg></span> 账号管理</a>
+        <a class="nav-link" :class="{active:section==='settings'}" href="/settings" @click="followSectionLink($event, 'settings')"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="m8 3 .5 1.5a6 6 0 0 1 3 0L12 3l2 1.2-.7 1.5a6 6 0 0 1 2 2l1.5-.2v2.3l-1.5.2a6 6 0 0 1 0 3l1.5.5-2 1.2-1.5-.7a6 6 0 0 1-2 2l.2 1.5H9.2L9 17a6 6 0 0 1-3 0l-.5 1.5-2-1.2.7-1.5a6 6 0 0 1-2-2l-1.5.2v-2.3l1.5-.2a6 6 0 0 1 0-3L2.7 8l2-1.2 1.5.7a6 6 0 0 1 2-2L8 4.5 8 3Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.1"/><circle cx="10" cy="10" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></span> 设置</a>
       </nav>
-      <div class="local-status"><span class="status-dot"></span><div><strong>本地单用户</strong><small>数据保存在本机</small></div></div>
+      <span class="sr-only">本地单用户</span>
     </aside>
     <main class="canvas">
       <div v-if="toast.text" class="toast" :class="`toast-${toast.kind}`" :role="toast.kind === 'success' ? 'status' : 'alert'" :aria-live="toast.kind === 'success' ? 'polite' : 'assertive'"><span>{{toast.text}}</span><button type="button" aria-label="关闭提示" title="关闭提示" @click="dismissToast">×</button></div>
       <section v-if="section==='topics'" class="page-section topics-page">
-        <div class="eyebrow">工作区</div><h1>内容</h1><p class="lede">把想法放进话题，基础稿会在这里保持清晰。</p>
-        <div class="profile-picker"><label for="content-profile">当前 Profile</label><select id="content-profile" v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select><a class="text-button" href="/settings" @click="followSectionLink($event, 'settings')">管理 Profile 与账号 →</a></div>
-        <form class="topic-create" @submit.prevent="addTopic"><input v-model="topicTitle" placeholder="新话题标题" :disabled="!selectedProfileID"><button class="primary-action" :disabled="!selectedProfileID">创建话题</button></form>
-        <div class="section-label"><span>话题</span><small>{{profileTopics.length}} 个</small><label v-if="topics.some(topic=>topic.profile_id===selectedProfileID&&topic.status==='archived')" class="inline-check"><input type="checkbox" v-model="showArchivedTopics">显示已归档</label></div>
-        <p v-if="profiles.length===0" class="empty-state">还没有 Profile。前往设置创建后，就可以开始第一个话题。</p><p v-else-if="profileTopics.length===0" class="empty-state">这个 Profile 还没有话题，从上方写下第一个标题吧。</p><ul v-else class="rows topic-list"><li v-for="topic in profileTopics" :key="topic.id"><a class="link" :href="`/topics/${encodeURIComponent(topic.id)}`" @click="followTopicLink($event, topic)">{{topic.title}}</a><span>{{topic.status==='archived'?'已归档':'进行中'}}</span><IconButton :icon="topic.status==='archived' ? 'refresh' : 'archive'" :label="topic.status==='archived' ? '恢复话题' : '归档话题'" @click="setTopicStatus(topic, topic.status==='archived'?'active':'archived')" /></li></ul>
+        <header class="management-head"><h1 id="topics-title">全部话题</h1></header>
+        <form class="topic-create mobile-topic-create" @submit.prevent="addTopic"><input v-model="topicTitle" placeholder="新话题标题" :disabled="!selectedProfileID"><button class="primary-action" :disabled="!selectedProfileID">＋ 新建话题</button></form>
+        <section class="topic-browser" aria-labelledby="topic-browser-title"><header class="topic-browser-head"><div class="section-label topic-count"><span id="topic-browser-title">话题</span><small>{{visibleTopics.length}} 个</small></div><div class="topic-management-tools">
+          <label class="management-search"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m12.5 12.5 4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg><input v-model="topicSearch" placeholder="搜索标题" aria-label="搜索全部话题"></label>
+          <label class="archived-filter"><input type="checkbox" v-model="showArchivedTopics">显示已归档</label>
+          <select id="content-profile" class="profile-select" v-model="selectedProfileID" aria-label="Profile"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select>
+        </div></header>
+        <p v-if="profiles.length===0" class="empty-state">还没有 Profile。前往账号管理创建后，就可以开始第一个话题。</p><p v-else-if="visibleTopics.length===0" class="empty-state">这个 Profile 还没有话题。</p><ul v-else class="rows management-list topic-list"><li v-for="topic in visibleTopics" :key="topic.id" class="management-row"><div class="row-main"><a class="link" :href="`/topics/${encodeURIComponent(topic.id)}`" @click="followTopicLink($event, topic)">{{topic.title}}</a></div><span class="topic-progress">{{topicProgress(topic)}}</span><IconButton :icon="topic.status==='archived' ? 'refresh' : 'archive'" :label="topic.status==='archived' ? '恢复话题' : '归档话题'" @click="setTopicStatus(topic, topic.status==='archived'?'active':'archived')" /></li></ul></section>
       </section>
       <section v-else-if="section==='editor' && selected" class="page-section editor-page">
-        <button class="back" @click="goSection('topics')">← 返回内容</button><div class="eyebrow">正在编辑</div><div class="topic-title-editor"><input v-model="topicTitleEdit" aria-label="话题标题"><button :disabled="!topicTitleDirty" @click="renameSelectedTopic">重命名</button></div><p class="lede">基础稿是源头；平台版本只在你确认后更新。<span class="help-tip" tabindex="0" role="img" aria-label="平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">平台版本不会随基础稿静默覆盖，需主动应用更新或另建版本。</span></span></p>
-        <textarea class="draft-editor" v-model="text" placeholder="从这里开始写…"></textarea>
-        <div class="actions editor-toolbar"><button class="primary-action" @click="saveDraft">{{draftDirty?'保存基础稿（有修改）':'保存基础稿'}}</button><select v-model="selectedAccountID" aria-label="目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} ({{account.platform}})</option></select><button class="primary-action" @click="publishFromDraft" :disabled="!selectedAccountID || draftPublishBusy">{{draftPublishBusy?'处理中…':selectedAccount && isBridgePlatform(selectedAccount.platform) ? '从基础稿填入' : '从基础稿直接发布'}}</button><button @click="newVariant">仅生成平台版本</button></div>
-        <div class="media-tools"><div class="section-label"><span>媒体</span><small>默认用于所有平台版本，图片只存储在本机</small></div><div class="actions media-controls"><select v-model="mediaVariantID" aria-label="图片适用范围"><option value="">所有平台版本</option><option v-for="variant in editableVariants" :key="variant.id" :value="variant.id">仅 {{variantAccountLabel(variant)}}</option></select><input v-model="altText" placeholder="图片替代文本"><label class="upload">添加图片<input type="file" accept="image/*" @change="uploadMedia"></label></div><ul v-if="media.length" class="media-list"><li v-for="item in media" :key="item.id"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span :title="item.filename">{{item.filename}}</span><small>{{mediaScopeLabel(item)}}</small><IconButton icon="trash" :label="`删除图片 ${item.filename}`" @click="deleteMedia(item)" /></li></ul></div>
-        <div class="platform-heading"><div><div class="section-label"><span>平台版本</span><small>{{variants.length}} 个版本</small><span class="help-tip" tabindex="0" role="img" aria-label="平台版本说明"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">列表只负责定位账号；页面只渲染当前版本。编辑控件由账号能力决定；Misskey 保留 MFM，Bluesky 使用纯文本与 facets。</span></span></div><p class="platform-subtitle">选择一个版本进行编辑，其他版本不会占用页面空间。</p></div></div>
+        <header class="editor-head">
+          <div class="editor-head-main"><div class="title-row"><input class="topic-title" v-model="topicTitleEdit" aria-label="话题标题"><span class="save-state" aria-live="polite">{{saveState === 'saving' ? '保存中…' : saveState === 'error' ? '保存失败' : ''}}</span><button v-if="saveState==='error'" type="button" class="quiet-action" @click="flushAutoSave">重试</button></div></div>
+          <details class="topic-more"><summary aria-label="更多话题操作" title="更多话题操作"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.2"/><circle cx="10" cy="10" r="1.2"/><circle cx="16" cy="10" r="1.2"/></svg></summary><div class="topic-more-menu"><button type="button" @click="goSection('topics')">返回话题列表</button></div></details>
+        </header>
+        <div class="document-tabs" role="tablist" aria-label="稿件版本"><button type="button" role="tab" :aria-selected="activeVariantID==='draft'" :class="['document-tab', {active:activeVariantID==='draft'}]" @click="selectDraft"><span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 3h7l3 3v11H5zM12 3v4h3" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span><span>主稿</span><small>内容源头</small></button><button v-for="variant in variants" :key="variant.id" type="button" role="tab" :aria-selected="activeVariantID===variant.id" :class="['document-tab', {active:activeVariantID===variant.id}]" :title="variantAccountLabel(variant)" @click="selectDocument(variant.id)"><span class="tab-icon"><PlatformIcon :platform="variantAccount(variant)?.platform" /></span><strong>{{variantTabLabel(variant)}}</strong><small>{{variantStatusLabel(variant)}}<b v-if="variant.outdated"> · 主稿有更新</b></small></button><button type="button" class="document-tab-add" aria-label="添加目标" @click="showTargetAdd=!showTargetAdd">＋</button></div>
+        <div v-if="showTargetAdd" class="target-add target-add-inline"><select v-model="selectedAccountID" aria-label="选择目标账号"><option value="">选择账号</option><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}} · {{platformLabel(account.platform)}}</option></select><button type="button" @click="newVariant" :disabled="!selectedAccountID">添加目标</button></div>
+        <div class="editor-shell"><div class="editor-paper"><textarea class="draft-editor" v-model="editorText" placeholder="从这里开始写…" :disabled="Boolean(activeVariant?.published)" aria-label="当前稿件正文" @blur="flushAutoSave"></textarea></div><div class="editor-toolbar"><div class="editor-tool-group"><button type="button" class="tool-button" :class="{active:editorTool==='emoji'}" @click="toggleEditorTool('emoji')" :disabled="!activeVariant || !variantCapability(activeVariant)?.custom_emoji"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M7 11.5s1 1.6 3 1.6 3-1.6 3-1.6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.4"/><circle cx="7.5" cy="8" r=".7"/><circle cx="12.5" cy="8" r=".7"/></svg>Emoji</button><button type="button" class="tool-button" :class="{active:editorTool==='translation'}" @click="toggleEditorTool('translation')" :disabled="!activeVariant"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h7M6.5 3v2M4 7c1.2 2.2 3 3.8 5.2 4.8M8.5 6c-.7 2.5-2.4 4.7-5 6M11 17l3.3-8 3.2 8M12.3 14.3h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"/></svg>翻译</button><details class="inline-more"><summary><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3v14M14 3v14M3 6h14M3 14h14" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>更多</summary><div class="inline-more-menu"><button type="button" @click="toggleEditorTool('external')">站外关联</button><button v-if="activeVariant?.published" type="button" @click="cloneVariant(activeVariant)" :disabled="variantBusy(activeVariant)">复制为新版本</button><button v-if="activeVariant && !variantAccount(activeVariant)?.disabled" type="button" aria-label="移除本地版本（不会删除远端帖子）" @click="deleteVariant(activeVariant)" :disabled="variantBusy(activeVariant)">移除版本</button></div></details></div><div class="editor-toolbar-right"><button v-if="activeVariant?.outdated&&!activeVariant.published" type="button" class="source-update" @click="applyVariant(activeVariant)" :disabled="variantBusy(activeVariant)">主稿已修改，点击更新</button><span class="draft-count">{{editorText.length}} 字符<span v-if="variantCapability(activeVariant)?.text_max_bytes"> · {{utf8Bytes(editorText)}} / {{variantCapability(activeVariant)?.text_max_bytes}} bytes</span></span></div></div><section v-if="activeVariant && variantCapability(activeVariant)?.custom_emoji" v-show="editorTool==='emoji'" class="editor-tool-panel" aria-label="实例 Emoji"><button type="button" @click="loadEmoji(activeVariant.account_id)" :disabled="emojiLoading">{{emojiLoading ? '加载中…' : '加载实例 emoji'}}</button><input v-model="emojiFilter" placeholder="搜索 shortcode" :disabled="emojiLoadedAccountID!==activeVariant.account_id"><div v-if="emojiLoadedAccountID===activeVariant.account_id" class="emoji-browser"><small>共 {{emojis.length}} 个，匹配 {{matchingEmojis.length}} 个，当前显示 {{visibleEmojis.length}} 个</small><div class="emoji-list"><button v-for="emoji in visibleEmojis" :key="emoji.shortcode" type="button" class="emoji" @click="insertEmoji(emoji, activeVariant)"><img loading="lazy" :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</button></div><button v-if="hasMoreEmojis" type="button" @click="showMoreEmoji">继续显示 50 个</button></div></section><section v-if="activeVariant" v-show="editorTool==='translation'" class="editor-tool-panel translation-tool" aria-label="翻译此版本"><label><span>目标账号</span><select v-model="translationTargetAccountID" aria-label="翻译目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select></label><label><span>源语言</span><input v-model="translationSourceLanguage" placeholder="自动识别"></label><label><span>目标语言</span><input v-model="translationTargetLanguage" placeholder="例如 zh"></label><label><span>翻译配置</span><select v-model="translationConfigID" aria-label="翻译配置"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select></label><button type="button" @click="translateActiveVariant" :disabled="!translationConfigID">生成版本</button></section><section v-show="editorTool==='external'" class="editor-tool-panel external-tool" aria-label="站外关联"><div class="actions"><button type="button" @click="requestCapture">捕获当前页面</button><a href="/userscript/bpm-bridge.user.js">安装桥接脚本</a></div><p v-if="bridgeRequest" class="bridge-request-status">最近请求：{{bridgeRequestState(bridgeRequest)}}<span v-if="bridgeRequest.warning"> · {{bridgeRequest.warning}}</span><span v-if="bridgeRequest.error"> · {{bridgeRequest.error}}</span></p><form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ 空间</option></select><select v-model="externalAccountID"><option value="">不关联账号</option><option v-for="account in externalPlatformAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form><form @submit.prevent="importExternal"><select v-model="externalImportAccountID" aria-label="导入账号"><option value="">选择 Misskey / Bluesky 账号</option><option v-for="account in profileAccounts.filter(item=>item.platform==='misskey'||item.platform==='bluesky')" :key="account.id" :value="account.id">{{account.name}} · {{platformLabel(account.platform)}}</option></select><input v-model="externalReference" placeholder="帖子 ID、URL 或 at://"><button :disabled="!canImportOfficially">导入快照</button></form><ul class="rows external-post-list"><li v-for="post in externalPosts" :key="post.id"><span>{{platformLabel(post.platform)}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small><button class="danger-text" @click="deleteExternalPost(post)">移除本地关联</button></li></ul></section></div>
+        <section class="flow-section media-flow"><div class="flow-head"><strong>媒体</strong><span>{{currentMedia.length}} 张 · 此版本使用通用媒体</span></div><ul v-if="currentMedia.length" class="media-list media-row"><li v-for="item in currentMedia" :key="item.id" class="media-item"><img :src="`/media/${item.id}`" :alt="item.alt_text||item.filename"><span class="media-label" :class="{missing:!item.alt_text}">{{item.alt_text ? '替代文本已填写' : '需要替代文本'}}</span><span class="media-filename" :title="item.filename">{{item.filename}}</span><small>{{mediaScopeLabel(item)}}</small><IconButton icon="trash" :label="`删除图片 ${item.filename}`" @click="deleteMedia(item)" /></li><li class="media-add-item"><button type="button" class="add-media" aria-label="添加图片" @click="mediaDialogOpen=true"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg></button></li></ul><div v-else class="media-row"><button type="button" class="add-media" aria-label="添加图片" @click="mediaDialogOpen=true"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg></button></div></section>
         <div v-if="variants.length===0" class="empty-state">还没有平台版本；选择目标账号后从基础稿生成。</div>
-        <div v-else class="variant-workspace">
-          <div class="variant-switcher"><label for="variant-search">查找平台版本</label><input id="variant-search" v-model="variantSearch" placeholder="搜索账号、平台、状态或正文…"><div class="variant-tabs" role="listbox" aria-label="平台版本列表"><button v-for="variant in filteredVariants" :key="variant.id" type="button" role="option" :aria-selected="activeVariant?.id === variant.id" :class="['variant-tab', { active: activeVariant?.id === variant.id }]" @click="selectVariant(variant)"><strong>{{variantAccountLabel(variant)}}</strong><small>{{variantFormatLabel(variant)}} · {{variantStatusLabel(variant)}}<b v-if="variantDirty(variant)"> · 未保存</b></small></button><p v-if="filteredVariants.length===0" class="empty-state">没有匹配的平台版本。</p></div></div>
-          <ul class="variants"><li v-if="activeVariant" class="variant-card"><header class="variant-header"><div><strong>{{variantAccountLabel(activeVariant)}}</strong><span>{{variantFormatLabel(activeVariant)}} · {{variantRelationLabel(activeVariant)}} · {{variantStatusLabel(activeVariant)}}<b v-if="variantDirty(activeVariant)" class="unsaved-mark"> · 未保存</b></span></div><em v-if="activeVariant.outdated">基础稿有更新</em></header><textarea ref="variantEditor" class="variant-editor" v-model="activeVariant.text" rows="5" :disabled="activeVariant.published"></textarea><div class="variant-inline-tools"><details v-if="variantCapability(activeVariant)?.custom_emoji" class="inline-tool" :open="emojiLoadedAccountID===activeVariant.account_id"><summary>插入实例 emoji</summary><div class="inline-tool-content"><div class="actions emoji-controls"><button type="button" class="secondary-action" @click="loadEmoji(activeVariant.account_id)" :disabled="emojiLoading || emojiLoadedAccountID===activeVariant.account_id">{{emojiLoading?'加载中…':emojiLoadedAccountID===activeVariant.account_id?'已加载':'加载实例 emoji'}}</button><input v-model="emojiFilter" placeholder="搜索 shortcode" :disabled="emojiLoadedAccountID!==activeVariant.account_id"></div><div v-if="emojiLoadedAccountID===activeVariant.account_id" class="emoji-browser"><small>共 {{emojis.length}} 个，匹配 {{matchingEmojis.length}} 个，当前显示 {{visibleEmojis.length}} 个</small><div class="emoji-list"><button v-for="emoji in visibleEmojis" :key="emoji.shortcode" type="button" class="emoji" :title="`插入 :${emoji.shortcode}:`" @click="insertEmoji(emoji, activeVariant)"><img loading="lazy" :src="emoji.static_url||emoji.url" alt="">:{{emoji.shortcode}}:</button></div><button v-if="hasMoreEmojis" type="button" @click="showMoreEmoji">继续显示 50 个</button></div></div></details><details class="inline-tool translation-tool"><summary>翻译此版本</summary><div class="inline-tool-content"><small>当前版本作为源文，只生成新的 detached 版本，不覆盖原文。</small><div class="actions"><select v-model="translationTargetAccountID" aria-label="翻译目标账号"><option v-for="account in profileAccounts" :key="account.id" :value="account.id">目标：{{account.name}}</option></select><input v-model="translationSourceLanguage" placeholder="源语言（可留空自动识别）"><input v-model="translationTargetLanguage" placeholder="目标语言，如 zh"><select v-model="translationConfigID" aria-label="翻译配置"><option value="">选择翻译配置</option><option v-for="config in translationConfigs" :key="config.id" :value="config.id">{{config.provider}} · {{config.model || config.project_id || config.id}}</option></select><button type="button" @click="translateActiveVariant" :disabled="!translationConfigID">生成翻译版本</button></div><p v-if="translationMessage" class="sr-only">{{translationMessage}}</p></div></details></div><div class="variant-options"><small v-if="variantCapability(activeVariant)?.text_max_bytes">UTF-8 {{utf8Bytes(activeVariant.text)}} / {{variantCapability(activeVariant)?.text_max_bytes}} bytes</small><label><span>可见范围</span><select v-model="activeVariant.visibility" :disabled="activeVariant.published"><option v-for="visibility in variantCapability(activeVariant)?.visibilities || []" :key="visibility">{{visibility}}</option></select></label><input v-if="variantCapability(activeVariant)?.supports_cw" v-model="activeVariant.spoiler_text" placeholder="内容警告（可选）" :disabled="activeVariant.published"><label v-if="variantCapability(activeVariant)?.supports_local_only" class="checkbox-option"><input type="checkbox" v-model="activeVariant.local_only" :disabled="activeVariant.published">仅本地</label></div><div v-if="variantCapability(activeVariant)?.format==='mfm'" class="mfm-preview"><small>原始 MFM 预览（本地不渲染）</small><pre class="preview">{{activeVariant.text}}</pre></div><footer class="variant-actions"><button v-if="!activeVariant.published" class="primary-action" :disabled="variantBusy(activeVariant)" @click="saveVariant(activeVariant)">{{variantBusy(activeVariant)?'处理中…':'保存版本'}}</button><button v-if="activeVariant.outdated&&!activeVariant.published" :disabled="variantBusy(activeVariant)" @click="applyVariant(activeVariant)">应用基础稿更新</button><button v-if="!activeVariant.published&&!variantAccount(activeVariant)?.disabled && !isBridgePlatform(variantAccount(activeVariant)?.platform||'')" :disabled="variantBusy(activeVariant)" @click="publish(activeVariant)">直接发布</button><template v-else-if="!activeVariant.published&&!variantAccount(activeVariant)?.disabled"><button :disabled="variantBusy(activeVariant)" @click="fillBrowser(activeVariant)">仅填入</button><button v-if="canAutoPublish(variantAccount(activeVariant)?.platform||'')" :disabled="variantBusy(activeVariant)" @click="fillBrowser(activeVariant, true)">填入并自动发布</button></template><small v-else-if="variantAccount(activeVariant)?.disabled" class="disabled-account">账号已停用，历史版本仅供查看</small><IconButton v-if="activeVariant.published" icon="copy" label="复制为新版本" :disabled="variantBusy(activeVariant)" @click="cloneVariant(activeVariant)" /><IconButton v-if="!variantAccount(activeVariant)?.disabled" icon="trash" label="移除本地版本（不会删除远端帖子）" :disabled="variantBusy(activeVariant)" @click="deleteVariant(activeVariant)" /></footer></li></ul>
-        </div>
-        <div class="bridge-status-panel" aria-label="浏览器桥接状态"><div class="section-label"><span>浏览器填入</span><small>发布入口保持可见</small><span class="help-tip" tabindex="0" role="img" aria-label="浏览器桥接帮助"><span aria-hidden="true">i</span><span class="help-tip-popup" role="tooltip">脚本只处理你当前已登录且可见的页面；自动发布必须按次确认。</span></span></div><details class="inline-help"><summary>查看配对与发布说明</summary><p class="bridge-steps">每个平台首次安装脚本并输入一次 code；此后配对会跨刷新和重启恢复。所有平台支持安全填入；只有已验收发布控件的平台才显示单次自动发布，带图时仍退回人工发布。</p></details><p class="settings-note">先<a href="/userscript/bpm-bridge.user.js">安装或更新本地用户脚本</a>。脚本只处理当前可见页面；自动发布默认关闭。</p><div class="actions bridge-controls"><select v-model="bridgePlatform"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button class="primary-action" @click="createBridgePairing">生成/重置配对 code</button><button @click="refreshBridgeState">刷新连接状态</button><button @click="requestCapture">捕获当前可见帖子</button></div><p v-if="bridgeMessage" class="sr-only">{{bridgeMessage}}</p><div v-if="bridgePairings.length===0" class="bridge-state">未安装/未配对：安装脚本后生成配对。</div><ul v-else class="rows bridge-pairings"><li v-for="pairing in bridgePairings" :key="pairing.id"><div><strong>{{pairing.platform}}：{{pairingState(pairing)}}</strong><code v-if="pairing.code">{{pairing.code}}</code><details v-if="pairing.page_url || displayableTime(pairing.last_seen_at) || pairing.expires_at" class="pairing-details"><summary>连接详情</summary><small v-if="pairing.page_url">当前页：{{pairing.page_url}}</small><small v-if="displayableTime(pairing.last_seen_at)">最后心跳：{{new Date(pairing.last_seen_at).toLocaleString()}}</small><small v-if="pairing.expires_at">有效期至：{{new Date(pairing.expires_at).toLocaleString()}}</small></details></div><div class="row-actions"><button v-if="pairing.code" @click="copyPairingCode(pairing)">复制 code</button><button v-if="!pairing.revoked" @click="revokeBridgePairing(pairing)">撤销</button></div></li></ul><p v-if="bridgeRequest" class="bridge-request-status">最近请求：{{bridgeRequest.kind}} · {{bridgeRequestState(bridgeRequest)}}<span v-if="bridgeRequest.warning"> · 提示：{{bridgeRequest.warning}}</span><span v-if="bridgeRequest.error"> · 错误：{{bridgeRequest.error}}</span></p></div>
-        <details class="tool-section"><summary>发布与导入工具</summary><div class="tool-content"><h3>浏览器桥接 v1</h3><small>默认仅填入；只有你对某次请求选择“填入并自动发布”后，脚本才会点击明确匹配且可见、启用的发布按钮。页面结构不匹配时停止并提示人工处理。</small>
-          <h3>站外关联</h3><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前本地脚本</a>（同源地址，不会触发 file:///）。安装到油猴后，在已登录的平台页面使用配对功能。</p><form @submit.prevent="markExternal"><select v-model="externalPlatform"><option>mastodon</option><option>misskey</option><option>bluesky</option><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><select v-model="externalAccountID"><option value="">不关联账号</option><option v-for="account in externalPlatformAccounts" :key="account.id" :value="account.id">{{account.name}}</option></select><input v-model="externalURL" placeholder="仅标记 URL，不抓取"><button>标记 URL</button></form><form @submit.prevent="importExternal"><select v-model="externalImportAccountID" aria-label="官方导入账号"><option value="">选择 Misskey / Bluesky 账号</option><option v-for="account in profileAccounts.filter(item=>item.platform==='misskey'||item.platform==='bluesky')" :key="account.id" :value="account.id">{{account.name}} · {{account.platform}}</option></select><input v-model="externalReference" placeholder="帖子 ID、URL 或 at://"><button :disabled="!canImportOfficially">官方 API 导入快照</button></form><ul class="rows external-post-list"><li v-for="post in externalPosts" :key="post.id"><span>{{post.platform}}<em v-if="post.incomplete">不完整：{{post.incomplete_reason}}</em></span><a :href="post.url" target="_blank" rel="noreferrer">{{post.url}}</a><small v-if="post.text_snapshot">{{post.text_snapshot.slice(0,120)}}</small><button class="danger-text" @click="deleteExternalPost(post)">移除本地关联</button></li></ul></div></details>
+        <section v-if="activeVariant" class="flow-section variant-settings" aria-labelledby="variant-settings-title"><div class="flow-head"><strong id="variant-settings-title">发布设置</strong></div><div class="variant-options"><label v-if="variantCapability(activeVariant)?.visibilities?.length"><span>可见范围</span><select v-model="activeVariant.visibility" :disabled="activeVariant.published"><option v-for="visibility in variantCapability(activeVariant)?.visibilities || []" :key="visibility">{{visibility}}</option></select></label><label v-if="variantCapability(activeVariant)?.supports_cw"><span>内容警告</span><input v-model="activeVariant.spoiler_text" placeholder="内容警告（可选）" :disabled="activeVariant.published"></label><label v-if="variantCapability(activeVariant)?.supports_local_only" class="checkbox-option"><input type="checkbox" v-model="activeVariant.local_only" :disabled="activeVariant.published">仅本地</label></div></section>
+        <section v-if="selected" class="publish-flow" aria-labelledby="publish-flow-title">
+          <div class="flow-head"><strong id="publish-flow-title">发布前检查</strong><span>{{preflightSummary}}</span></div>
+          <ul class="preflight-list">
+            <li v-for="check in preflightChecks" :key="check.title" :class="`preflight-${check.tone}`">
+              <span class="check-icon" aria-hidden="true">{{check.tone === 'ok' ? '✓' : check.tone === 'warning' ? '!' : '×'}}</span>
+              <span class="check-copy"><strong>{{check.title}}</strong><small>{{check.detail}}</small></span>
+              <span class="check-result">{{check.result}}</span>
+            </li>
+          </ul>
+          <div class="publish-area"><button type="button" class="primary-action publish-cta publish-button" :disabled="!selectedAccountID || Boolean(activeVariant?.published) || preflightBlocking || publishDialogBusy" @click="openPublishDialog"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 10 14-7-5 14-2-5-7-2Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>继续发布</button></div>
+        </section>
       </section>
       <section v-else-if="section==='editor'" class="page-section empty-editor">
         <div class="eyebrow">正在编辑</div><h1>先选择一个话题</h1><p class="lede">从内容列表打开话题后，基础稿和平台版本会显示在这里。</p><button class="primary-action" @click="goSection('topics')">返回内容</button>
       </section>
-      <section v-else-if="section==='settings'" class="page-section settings-page">
-        <div class="eyebrow">偏好与连接</div><h1>设置</h1><p class="lede">Profile、账号和本地工具配置。</p>
-        <div class="section-label"><span>Profile</span><small>内容分组</small></div><form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button class="primary-action">添加 Profile</button></form>
-        <div class="section-label"><span>平台账号</span><small>支持自动授权、本地凭据或环境变量</small></div>
-        <form class="account-setup" @submit.prevent="addAccount">
-          <div class="account-identity-grid">
-            <label><span>内容分组</span><select v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select></label>
-            <label><span>账号名称</span><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"></label>
-            <label><span>平台</span><select v-model="accountPlatform" @change="accountPlatformChanged" :disabled="!selectedProfileID"><option value="mastodon">Mastodon-compatible</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ空间</option></select></label>
-          </div>
-          <details class="inline-help platform-description"><summary>平台说明</summary><p class="settings-note">{{platformDescription}}</p></details>
-          <label v-if="accountPlatform==='bluesky'" class="account-field"><span>远端身份</span><input v-model="remoteID" placeholder="Bluesky handle/identifier" :disabled="!selectedProfileID"></label>
-          <label v-if="!isBridgePlatform(accountPlatform)" class="account-field"><span>实例地址</span><input v-model="baseURL" :placeholder="baseURLPlaceholder" :disabled="!selectedProfileID"></label>
-          <div v-if="accountPlatform==='mastodon' || accountPlatform==='misskey'" class="connection-inline"><button type="button" class="primary-action" @click="startConnection(accountPlatform)" :disabled="!selectedProfileID || !baseURL.trim()">{{accountPlatform==='mastodon'?'OAuth 自动连接':'MiAuth 自动连接'}}</button><small>推荐。授权在当前回环服务完成，成功后自动添加账号。</small></div>
-          <p v-if="connectionMessage" class="sr-only">{{connectionMessage}}</p>
-          <div v-if="!isBridgePlatform(accountPlatform)" class="manual-account-row"><label class="account-field"><span>本地凭据（推荐）</span><input v-model="accountSecret" type="password" autocomplete="new-password" placeholder="access token / app password" :disabled="!selectedProfileID"></label><details class="credential-advanced"><summary>高级：使用环境变量</summary><label class="account-field"><span>环境变量名</span><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder" :disabled="!selectedProfileID"></label><small>本地模式会将凭据保存在数据目录的权限受限文件中；环境变量只在发布时读取。</small></details><button :disabled="!selectedProfileID">手动添加</button></div>
-          <button v-else class="primary-action" :disabled="!selectedProfileID">添加桥接账号</button>
-        </form>
-        <ul class="rows account-list"><li v-for="account in profileAccounts" :key="account.id"><div class="account-row-main"><span>{{account.name}} · {{account.platform}}</span><div class="row-actions"><button v-if="account.platform==='bluesky'" type="button" @click="diagnoseBluesky(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><button v-if="isMastodon(account)" type="button" @click="diagnoseMastodon(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><IconButton icon="edit" label="编辑连接" @click="beginEditAccount(account)" /><IconButton icon="archive" label="停用账号并移除凭据" @click="removeAccount(account)" /></div></div><details v-if="editingAccountID===account.id" class="account-edit" open><summary>编辑连接信息</summary><form @submit.prevent="updateAccount(account)"><label>名称<input v-model="editAccountName"></label><label v-if="account.platform==='bluesky'">handle / DID<input v-model="editRemoteID"></label><label v-if="!isBridgePlatform(account.platform)">服务地址<input v-model="editBaseURL"></label><label v-if="!isBridgePlatform(account.platform)">新 access token / app password（留空保持不变）<input v-model="editAccountSecret" type="password" autocomplete="new-password"></label><details v-if="!isBridgePlatform(account.platform)" class="credential-advanced"><summary>切换到环境变量</summary><input v-model="editTokenEnv" placeholder="环境变量名（留空保持当前凭据）"><small>填写后会清除当前本地凭据引用。</small></details><div class="row-actions"><button type="submit" class="primary-action">保存连接信息</button><button type="button" @click="cancelEditAccount">取消</button></div></form></details><details v-if="account.platform==='bluesky'" class="account-diagnostic"><summary>Bluesky 连接诊断</summary><p v-if="!blueskyDiagnostic[account.id]" class="settings-note">尚未检测。测试只会创建会话，不会发布内容；凭据不会返回或写入日志。</p><div v-else :class="['diagnostic-result', blueskyDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{blueskyDiagnostic[account.id].message}}</strong><small>阶段：{{blueskyDiagnostic[account.id].stage}} · 分类：{{blueskyDiagnostic[account.id].category || 'ok'}} · {{blueskyDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="blueskyDiagnostic[account.id].handle">身份：@{{blueskyDiagnostic[account.id].handle}} · {{blueskyDiagnostic[account.id].did}}</small><small v-if="blueskyDiagnostic[account.id].hint">建议：{{blueskyDiagnostic[account.id].hint}}</small></div></details><details v-else-if="isMastodon(account)" class="account-diagnostic"><summary>Mastodon 连接诊断</summary><p v-if="!mastodonDiagnostic[account.id]" class="settings-note">尚未检测。不会发布动态或上传媒体；OPTIONS 只检查端点兼容性，不能证明写入 scope。</p><div v-else :class="['diagnostic-result', mastodonDiagnostic[account.id].ok?'is-ok':'is-error']"><strong>{{mastodonDiagnostic[account.id].message}}</strong><small>阶段：{{mastodonDiagnostic[account.id].stage}} · 分类：{{mastodonDiagnostic[account.id].category || 'ok'}} · {{mastodonDiagnostic[account.id].elapsed_ms}} ms</small><small v-if="mastodonDiagnostic[account.id].username">身份：@{{mastodonDiagnostic[account.id].username}} · {{mastodonDiagnostic[account.id].account_id}}</small><small>发帖端点：{{mastodonDiagnostic[account.id].status_write.message}}</small><small>媒体端点：{{mastodonDiagnostic[account.id].media_write.message}}</small><small v-if="mastodonDiagnostic[account.id].hint">建议：{{mastodonDiagnostic[account.id].hint}}</small></div></details></li></ul>
-        <div v-if="disabledProfileAccounts.length" class="disabled-accounts"><small>已停用账号（历史仍保留）</small><ul class="rows account-list"><li v-for="account in disabledProfileAccounts" :key="account.id"><span>{{account.name}} · {{account.platform}}</span><span class="row-actions"><IconButton icon="refresh" label="准备重新连接" @click="prepareReconnect(account)" /><IconButton icon="trash" label="永久删除本地账号数据" @click="permanentlyDeleteAccount(account)" /></span></li></ul></div><div class="section-label"><span>翻译 provider</span><small>配置不包含 key/token</small></div><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option><option value="google-gtx">Google translate_a（非官方）</option></select><p class="settings-note platform-description">{{translationProviderDescription}}</p><input v-if="translationProvider!=='google-gtx'" v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="自定义 API 地址（高级，可选）"><input v-if="translationProvider!=='google-gtx'" v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form><p v-if="translationMessage" class="sr-only">{{translationMessage}}</p>
-        <details class="tool-section backup-section"><summary>备份与凭据 <small>离线可恢复</small></summary><p class="settings-note">用户脚本安装/更新：<a href="/userscript/bpm-bridge.user.js">打开当前同源脚本</a>。每个平台首次输入一次 code，之后保存在油猴隔离存储；可在悬浮窗断开或从 WebUI 撤销。使用 CLI 执行 <code>bpm backup create backup.zip</code> 和 <code>bpm backup restore backup.zip 空目录</code>。备份包含 SQLite、本地图片和校验清单，不包含环境变量值或其他明文凭据。</p></details>
+      <section v-else-if="section==='accounts'" class="page-section accounts-page">
+        <header class="management-head">
+          <div><h1>账号管理</h1></div>
+          <details class="account-create-panel">
+            <summary class="primary-action">＋ 连接账号</summary>
+            <div class="account-create-content">
+              <details class="inline-help platform-description"><summary>平台说明</summary><p class="settings-note">{{platformDescription}}</p></details>
+              <form class="account-setup" @submit.prevent="addAccount"><div class="account-identity-grid"><label><span>账号名称</span><input v-model="accountName" placeholder="账号名称" :disabled="!selectedProfileID"></label><label><span>平台</span><select v-model="accountPlatform" @change="accountPlatformChanged" :disabled="!selectedProfileID"><option value="mastodon">Mastodon</option><option value="misskey">Misskey</option><option value="bluesky">Bluesky</option><option value="x">X</option><option value="weibo">微博</option><option value="xiaohongshu">小红书</option><option value="qzone">QQ 空间</option></select></label><label v-if="accountPlatform==='bluesky'"><span>远端身份</span><input v-model="remoteID" placeholder="handle / identifier"></label></div><label v-if="!isBridgePlatform(accountPlatform)" class="account-field"><span>实例地址</span><input v-model="baseURL" :placeholder="baseURLPlaceholder"></label><div v-if="accountPlatform==='mastodon' || accountPlatform==='misskey'" class="connection-inline"><button type="button" class="primary-action" @click="startConnection(accountPlatform)" :disabled="!selectedProfileID || !baseURL.trim()">{{accountPlatform==='mastodon'?'OAuth 自动连接':'MiAuth 自动连接'}}</button></div><div v-if="!isBridgePlatform(accountPlatform)" class="manual-account-row"><label class="account-field"><span>本地凭据</span><input v-model="accountSecret" type="password" autocomplete="new-password" placeholder="access token / app password"></label><details class="credential-advanced"><summary>使用环境变量</summary><input v-model="tokenEnv" :placeholder="tokenEnvPlaceholder"></details><button :disabled="!selectedProfileID">添加账号</button></div><button v-else class="primary-action" :disabled="!selectedProfileID">添加账号</button></form>
+            </div>
+          </details>
+        </header>
+        <div class="account-management-tools"><label for="account-profile">Profile</label><select id="account-profile" v-model="selectedProfileID"><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{profile.name}}</option></select></div>
+        <div class="section-label"><span>已连接账号</span><small>{{profileAccounts.length}} 个</small></div><ul class="account-list account-grid"><li v-for="account in profileAccounts" :key="account.id" class="account-card"><div class="account-row-main"><span><strong>{{account.name}}</strong><small>{{platformLabel(account.platform)}}<template v-if="account.remote_id"> · {{account.remote_id}}</template></small></span><div class="row-actions"><button v-if="account.platform==='bluesky' || isMastodon(account)" type="button" @click="account.platform==='bluesky'?diagnoseBluesky(account):diagnoseMastodon(account)" :disabled="diagnosticIsBusy(account)">{{diagnosticIsBusy(account)?'检测中…':'测试连接'}}</button><IconButton icon="edit" label="编辑连接" @click="beginEditAccount(account)" /><IconButton icon="archive" label="停用账号并移除凭据" @click="removeAccount(account)" /></div></div><details v-if="editingAccountID===account.id" class="account-edit" open><summary>编辑连接信息</summary><form @submit.prevent="updateAccount(account)"><label>名称<input v-model="editAccountName"></label><label v-if="account.platform==='bluesky'">handle / DID<input v-model="editRemoteID"></label><label v-if="!isBridgePlatform(account.platform)">服务地址<input v-model="editBaseURL"></label><label v-if="!isBridgePlatform(account.platform)">新凭据<input v-model="editAccountSecret" type="password" autocomplete="new-password"></label><details v-if="!isBridgePlatform(account.platform)" class="credential-advanced"><summary>环境变量</summary><input v-model="editTokenEnv" placeholder="环境变量名"><small>保存后使用环境变量读取凭据。</small></details><div class="row-actions"><button type="submit" class="primary-action">保存</button><button type="button" @click="cancelEditAccount">取消</button></div></form></details><div v-if="account.platform==='bluesky' && blueskyDiagnostic[account.id]" class="diagnostic-result" :class="blueskyDiagnostic[account.id].ok?'is-ok':'is-error'">{{blueskyDiagnostic[account.id].message}}<small v-if="blueskyDiagnostic[account.id].hint">{{blueskyDiagnostic[account.id].hint}}</small></div><div v-if="isMastodon(account) && mastodonDiagnostic[account.id]" class="diagnostic-result" :class="mastodonDiagnostic[account.id].ok?'is-ok':'is-error'">{{mastodonDiagnostic[account.id].message}}</div></li></ul><p v-if="!profileAccounts.length" class="empty-state">还没有账号。</p>
+        <div v-if="disabledProfileAccounts.length" class="disabled-accounts"><div class="section-label"><span>已停用账号</span></div><ul class="rows"><li v-for="account in disabledProfileAccounts" :key="account.id"><span>{{account.name}} · {{platformLabel(account.platform)}}</span><span class="row-actions"><IconButton icon="refresh" label="准备重新连接" @click="prepareReconnect(account)" /><IconButton icon="trash" label="永久删除本地账号数据" @click="permanentlyDeleteAccount(account)" /></span></li></ul></div>
       </section>
-      <section v-else class="page-section history-page"><div class="eyebrow">历史</div><h1>发布记录</h1><p class="lede">每次发布的结果和可恢复状态都在这里。</p><PublicationList @notify="showToast" /></section>
+      <section v-else-if="section==='settings'" class="page-section settings-page">
+        <h1>设置</h1>
+        <section class="settings-block profile-settings" aria-labelledby="profile-settings-title"><header class="settings-block-head"><h2 id="profile-settings-title">Profile</h2></header><form @submit.prevent="addProfile"><input v-model="profileName" placeholder="新 Profile"><button class="primary-action">添加 Profile</button></form></section>
+        <section class="settings-block translation-settings" aria-labelledby="translation-settings-title"><header class="settings-block-head"><h2 id="translation-settings-title">翻译 provider</h2></header><form class="actions" @submit.prevent="addTranslationConfig"><select v-model="translationProvider" aria-label="翻译 provider"><option value="openai">OpenAI-compatible</option><option value="deepl">DeepL</option><option value="google">Google Cloud</option><option value="google-gtx">Google translate_a</option></select><p class="settings-note platform-description">{{translationProviderDescription}}</p><input v-if="translationProvider!=='google-gtx'" v-model="translationCredentialEnv" placeholder="token/key 环境变量名"><input v-model="translationBaseURL" placeholder="自定义 API 地址（高级，可选）"><input v-if="translationProvider!=='google-gtx'" v-model="translationProjectOrModel" :placeholder="translationProvider==='google'?'Google project id':'可选模型名'"><button>保存翻译配置</button></form></section>
+        <section class="settings-block bridge-settings" aria-labelledby="bridge-settings-title"><header class="settings-block-head"><h2 id="bridge-settings-title">浏览器桥接</h2></header><div class="tool-content"><div class="actions bridge-controls"><select v-model="bridgePlatform" aria-label="桥接平台"><option>x</option><option>weibo</option><option>xiaohongshu</option><option>qzone</option></select><button type="button" @click="createBridgePairing">生成配对 code</button><button type="button" @click="refreshBridgeState">刷新连接状态</button></div><ul v-if="bridgePairings.length" class="rows bridge-pairings"><li v-for="pairing in bridgePairings" :key="pairing.id"><strong>{{pairing.platform}}：{{pairingState(pairing)}}</strong><code v-if="pairing.code">{{pairing.code}}</code><button v-if="pairing.code" type="button" @click="copyPairingCode(pairing)">复制 code</button><button v-if="!pairing.revoked" type="button" @click="revokeBridgePairing(pairing)">撤销</button></li></ul><p v-else class="empty-state">尚未配对</p></div></section>
+      </section>
+      <section v-if="section==='history'" class="page-section history-page"><header><h1>发布中心</h1></header><PublicationList @notify="showToast" /></section>
     </main>
+    <div v-if="mediaDialogOpen" class="modal-backdrop" role="presentation" @click.self="mediaDialogOpen=false"><section class="media-dialog" role="dialog" aria-modal="true" aria-labelledby="media-dialog-title"><header><h2 id="media-dialog-title">添加图片</h2><button type="button" class="icon-button" aria-label="关闭" title="关闭" @click="mediaDialogOpen=false">×</button></header><div class="media-dialog-fields"><label><span>适用范围</span><select v-model="mediaVariantID" aria-label="图片适用范围"><option value="">所有平台版本</option><option v-for="variant in editableVariants" :key="variant.id" :value="variant.id">仅 {{variantAccountLabel(variant)}}</option></select></label><label><span>替代文本</span><input v-model="altText" placeholder="描述图片内容"></label></div><footer><button type="button" @click="mediaDialogOpen=false">取消</button><label class="primary-action upload">选择图片<input type="file" accept="image/*" @change="uploadMedia"></label></footer></section></div>
+    <div v-if="publishDialogOpen && activeVariant" class="modal-backdrop" role="presentation" @click.self="closePublishDialog"><section ref="publishDialogEl" class="publish-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-dialog-title"><header><div><span class="eyebrow">最终确认</span><h2 id="publish-dialog-title">发布到 {{variantAccountLabel(activeVariant)}}</h2></div><button type="button" class="icon-button" aria-label="返回编辑" title="返回编辑" @click="closePublishDialog">×</button></header><div class="dialog-target"><strong>{{platformLabel(variantAccount(activeVariant)?.platform)}} · {{variantAccount(activeVariant)?.name}}</strong><span>{{variantRelationLabel(activeVariant)}} · {{activeVariant.visibility}}</span></div><article class="dialog-post-preview"><pre>{{activeVariant.text}}</pre><div v-if="currentMedia.length" class="dialog-media" :class="`media-count-${Math.min(currentMedia.length, 4)}`"><img v-for="item in currentMedia.slice(0, 4)" :key="item.id" :src="`/media/${item.id}`" :alt="item.alt_text || item.filename"><span v-if="currentMedia.length>4" class="media-more">+{{currentMedia.length-4}}</span></div><p v-else class="no-media">无媒体</p></article><label v-if="isBridgePlatform(variantAccount(activeVariant)?.platform || '')" class="dialog-auto-publish"><input v-model="bridgeAutoPublish" type="checkbox">本次请求自动发布</label><footer><button type="button" @click="closePublishDialog">返回编辑</button><button type="button" class="primary-action" :disabled="publishDialogBusy" @click="confirmPublish">{{publishDialogBusy?'处理中…':isBridgePlatform(variantAccount(activeVariant)?.platform||'')?'发送到平台页面':'确认发布'}}</button></footer></section></div>
   </div>
 </template>

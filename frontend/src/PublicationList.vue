@@ -20,8 +20,7 @@ const statusLabels: Record<string,string> = {
   needs_confirmation:'需要人工确认', cancelled:'确认未发布',
 }
 function statusLabel(status:string){ return statusLabels[status] || status }
-function accountLabel(publication:Publication){ const account=accounts.value.find(item=>item.id===publication.account_id); return account ? `${account.name} · ${account.platform}` : publication.account_id }
-function sourceLabel(source:string){ return source==='bridge'?'浏览器桥接':'官方接口' }
+function accountLabel(publication:Publication){ const account=accounts.value.find(item=>item.id===publication.account_id); if(!account)return publication.account_id;const platform=({mastodon:'Mastodon','mastodon-compatible':'Mastodon',misskey:'Misskey',bluesky:'Bluesky',x:'X',weibo:'微博',xiaohongshu:'小红书',qzone:'QQ 空间'} as Record<string,string>)[account.platform]||account.platform;return `${account.name} · ${platform}` }
 function setBusy(id:string,value:boolean){ const next=new Set(busy.value); if(value)next.add(id);else next.delete(id);busy.value=next }
 
 async function load(){try{const [publications,loadedAccounts]=await Promise.all([api<Publication[]>('publications'),api<Account[]>('accounts')]);rows.value=listOrEmpty(publications);accounts.value=listOrEmpty(loadedAccounts)}catch(error){message.value=error instanceof Error?error.message:String(error)}}
@@ -38,7 +37,7 @@ onMounted(load)
   <p v-if="rows.length===0">还没有发布记录。</p>
   <ul v-else class="publication-list">
     <li v-for="publication in rows" :key="publication.id" class="publication-card">
-      <header><div><strong>{{accountLabel(publication)}}</strong><span>{{sourceLabel(publication.source)}} · {{new Date(publication.created_at).toLocaleString()}}</span></div><em :class="`publication-status status-${publication.status}`">{{statusLabel(publication.status)}}</em></header>
+      <header><div><strong>{{accountLabel(publication)}}</strong><span>{{new Date(publication.created_at).toLocaleString()}}</span></div><em :class="`publication-status status-${publication.status}`">{{statusLabel(publication.status)}}</em></header>
       <a v-if="publication.remote_url" :href="publication.remote_url" target="_blank" rel="noreferrer">{{publication.remote_url}}</a>
       <span v-else-if="publication.remote_id">远端 ID：{{publication.remote_id}}</span>
       <p v-if="publication.error_message">{{publication.error_message}}</p>
