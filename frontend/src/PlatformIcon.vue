@@ -2,10 +2,11 @@
 import { computed } from 'vue'
 import { siMastodon, siBluesky, siX, siSinaweibo, siXiaohongshu, siQzone, siMisskey } from 'simple-icons'
 import type { SimpleIcon } from 'simple-icons'
+import type { PlatformID } from './platformRegistry'
 
 const props = defineProps<{ platform?: string }>()
 
-const iconMap: Record<string, SimpleIcon> = {
+const iconMap: Record<PlatformID, SimpleIcon> = {
   mastodon: siMastodon,
   'mastodon-compatible': siMastodon,
   bluesky: siBluesky,
@@ -16,7 +17,7 @@ const iconMap: Record<string, SimpleIcon> = {
   misskey: siMisskey,
 }
 
-const icon = computed<SimpleIcon | null>(() => (props.platform ? (iconMap[props.platform] ?? null) : null))
+const icon = computed<SimpleIcon | null>(() => (props.platform ? (iconMap[props.platform as PlatformID] ?? null) : null))
 </script>
 
 <template>
