@@ -212,9 +212,35 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	case path == "profile-accounts":
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		var req struct {
+			ProfileID string `json:"profile_id"`
+			AccountID string `json:"account_id"`
+		}
+		if e := decode(r, &req); e != nil {
+			fail(w, http.StatusBadRequest, e)
+			return
+		}
+		v, e := s.Svc.Store.AttachAccount(ctx, req.ProfileID, req.AccountID)
+		if e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if errors.Is(e, app.ErrConflict) {
+				status = http.StatusConflict
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusCreated, v)
+		}
+		return
 	case path == "topics":
 		if r.Method == http.MethodGet {
-			v, e := s.Svc.Store.ListTopics(ctx, r.URL.Query().Get("profile_id"))
+			v, e := s.Svc.Store.ListTopicSummaries(ctx, r.URL.Query().Get("profile_id"))
 			if e != nil {
 				fail(w, 500, e)
 			} else {
@@ -274,7 +300,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 	case path == "publications":
 		if r.Method == http.MethodGet {
-			v, e := s.Svc.Store.ListPublications(ctx)
+			v, e := s.Svc.Store.ListPublicationSummariesForProfile(ctx, strings.TrimSpace(r.URL.Query().Get("profile_id")))
 			if e != nil {
 				fail(w, 500, e)
 			} else {
@@ -304,6 +330,23 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 201, v)
 			return
 		}
+	case path == "publications/summary":
+		if r.Method != http.MethodGet {
+			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		profileID := strings.TrimSpace(r.URL.Query().Get("profile_id"))
+		if profileID == "" {
+			fail(w, http.StatusBadRequest, fmt.Errorf("profile_id is required"))
+			return
+		}
+		v, e := s.Svc.Store.PublicationStatusSummary(ctx, profileID)
+		if e != nil {
+			fail(w, http.StatusInternalServerError, e)
+		} else {
+			writeJSON(w, http.StatusOK, v)
+		}
+		return
 	case path == "publications/retry" && r.Method == http.MethodPost:
 		var req struct {
 			PublicationID string `json:"publication_id"`
@@ -612,22 +655,87 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.variant(w, r, strings.TrimPrefix(path, "variants/"))
 		return
 	case path == "media" && r.Method == http.MethodGet:
-		v, e := s.Svc.Store.ListMedia(ctx, r.URL.Query().Get("topic_id"))
+		topicID := r.URL.Query().Get("topic_id")
+		var v []app.Media
+		var e error
+		if _, scoped := r.URL.Query()["variant_id"]; scoped {
+			v, e = s.Svc.Store.ListMediaForVariant(ctx, topicID, r.URL.Query().Get("variant_id"))
+		} else {
+			v, e = s.Svc.Store.ListMedia(ctx, topicID)
+		}
 		if e != nil {
-			fail(w, 500, e)
+			status := http.StatusInternalServerError
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			} else if strings.Contains(e.Error(), "same topic") {
+				status = http.StatusBadRequest
+			}
+			fail(w, status, e)
 		} else {
 			writeJSON(w, 200, v)
+		}
+		return
+	case path == "media/order" && r.Method == http.MethodPut:
+		var req struct {
+			TopicID   string   `json:"topic_id"`
+			VariantID string   `json:"variant_id"`
+			MediaIDs  []string `json:"media_ids"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 2<<20))
+		decoder.DisallowUnknownFields()
+		if e := decoder.Decode(&req); e != nil {
+			fail(w, http.StatusBadRequest, e)
+			return
+		}
+		if req.TopicID == "" || req.MediaIDs == nil {
+			fail(w, http.StatusBadRequest, errors.New("topic_id and media_ids are required"))
+			return
+		}
+		if e := s.Svc.Store.ReorderMedia(ctx, req.TopicID, req.VariantID, req.MediaIDs); e != nil {
+			status := http.StatusBadRequest
+			if errors.Is(e, app.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			fail(w, status, e)
+		} else {
+			writeJSON(w, http.StatusOK, map[string][]string{"media_ids": req.MediaIDs})
 		}
 		return
 	case path == "media" && r.Method == http.MethodPost:
 		s.upload(w, r)
 		return
 	case strings.HasPrefix(path, "media/"):
+		id := strings.TrimPrefix(path, "media/")
+		if r.Method == http.MethodPatch {
+			var req struct {
+				AltText *string `json:"alt_text"`
+			}
+			decoder := json.NewDecoder(io.LimitReader(r.Body, 2<<20))
+			decoder.DisallowUnknownFields()
+			if e := decoder.Decode(&req); e != nil {
+				fail(w, http.StatusBadRequest, e)
+				return
+			}
+			if req.AltText == nil {
+				fail(w, http.StatusBadRequest, errors.New("alt_text is required"))
+				return
+			}
+			updated, e := s.Svc.Store.UpdateMediaAltText(ctx, id, *req.AltText)
+			if e != nil {
+				status := http.StatusBadRequest
+				if errors.Is(e, app.ErrNotFound) {
+					status = http.StatusNotFound
+				}
+				fail(w, status, e)
+			} else {
+				writeJSON(w, http.StatusOK, updated)
+			}
+			return
+		}
 		if r.Method != http.MethodDelete {
 			fail(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 			return
 		}
-		id := strings.TrimPrefix(path, "media/")
 		if err := s.Svc.Store.DeleteMedia(ctx, id); err != nil {
 			status := http.StatusBadRequest
 			if errors.Is(err, app.ErrNotFound) {

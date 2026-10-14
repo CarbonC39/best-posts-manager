@@ -15,6 +15,34 @@ import (
 	"best-post-manager/internal/service"
 )
 
+func mustBridgeManager(t *testing.T, store *app.Store) *bridge.Manager {
+	t.Helper()
+	manager, err := bridge.NewManager(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
+
+func TestBridgeLazyInitializationFailureReturnsInternalServerError(t *testing.T) {
+	st, err := app.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err = st.DB.Exec(`INSERT INTO bridge_pairings(id,platform,token_hash,token_expires_at,revoked,created_at) VALUES('broken','x','invalid','2026-01-02T00:00:00Z',0,'2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Svc: service.New(st)}
+	for _, path := range []string{"/api/bridge/pairings", "/bridge/v1/requests"} {
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil))
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("GET %s status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func TestBridgeHTTPPairFillResultAndCapture(t *testing.T) {
 	ctx := context.Background()
 	st, err := app.Open(ctx, t.TempDir())
@@ -27,7 +55,7 @@ func TestBridgeHTTPPairFillResultAndCapture(t *testing.T) {
 	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p.ID, Title: "t"})
 	_, _ = st.UpdateBaseDraft(ctx, app.BaseDraft{TopicID: topic.ID, Text: "hello", Format: "plain"})
 	v, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: a.ID}, "")
-	s := &Server{Svc: service.New(st), Bridge: bridge.NewManager(st)}
+	s := &Server{Svc: service.New(st), Bridge: mustBridgeManager(t, st)}
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 	post := func(path string, body any, out any) *http.Response {
@@ -86,11 +114,11 @@ func TestBridgeHTTPPairFillResultAndCapture(t *testing.T) {
 		t.Fatalf("capture request: %s", res.Status)
 	}
 	res = postBridge(t, ts.URL+"/bridge/v1/requests/"+capture.ID+"/capture", hello.Token, capture.ID, "x", map[string]any{"text": "visible", "url": "https://x.com/post/1", "incomplete": false}, &capture)
-	if res.StatusCode != 200 {
-		t.Fatalf("capture: %s", res.Status)
+	if res.StatusCode != 200 || capture.Status != "captured" || capture.ExternalPostID == "" {
+		t.Fatalf("capture: %s %+v", res.Status, capture)
 	}
 	posts, err := st.ListExternalPosts(ctx, topic.ID)
-	if err != nil || len(posts) != 1 || posts[0].CapturedBy != "browser" {
+	if err != nil || len(posts) != 1 || posts[0].CapturedBy != "browser" || posts[0].ID != capture.ExternalPostID {
 		t.Fatalf("snapshot: %+v %v", posts, err)
 	}
 }
@@ -142,7 +170,7 @@ func TestBridgeRejectsOversizedBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	ts := httptest.NewServer(&Server{Svc: service.New(st), Bridge: bridge.NewManager(st)})
+	ts := httptest.NewServer(&Server{Svc: service.New(st), Bridge: mustBridgeManager(t, st)})
 	defer ts.Close()
 	res, err := http.Post(ts.URL+"/bridge/v1/hello", "application/json", strings.NewReader(strings.Repeat("x", bridge.MaxBodyBytes+1)))
 	if err != nil {
@@ -160,7 +188,7 @@ func TestBridgeRejectsChunkedOversizeAndCrossOriginAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	ts := httptest.NewServer(&Server{Svc: service.New(st), Bridge: bridge.NewManager(st)})
+	ts := httptest.NewServer(&Server{Svc: service.New(st), Bridge: mustBridgeManager(t, st)})
 	defer ts.Close()
 
 	oversized := "{\"code\":\"" + strings.Repeat("x", bridge.MaxBodyBytes+1) + "\",\"platform\":\"x\",\"page_url\":\"https://x.com\"}"

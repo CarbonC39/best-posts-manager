@@ -76,6 +76,194 @@ func TestTopicMetadataExternalPostDeletionAndPublicationConfirmation(t *testing.
 	}
 }
 
+func TestCapturedExternalPostAndBridgeRequestCommitTogether(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "x", Name: "x"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "topic"})
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	pending := BridgeRequestRecord{ID: "capture-request", PairingID: "pair", Status: "pending", ExpiresAt: expiresAt, Payload: []byte(`{"status":"pending"}`)}
+	if err = store.SaveBridgeRequest(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.ExecContext(ctx, `CREATE TRIGGER reject_capture_request BEFORE UPDATE ON bridge_requests BEGIN SELECT RAISE(ABORT,'forced request update failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	post := ExternalPost{ID: "captured-post", TopicID: topic.ID, AccountID: account.ID, Platform: "x", URL: "https://x.com/user/status/1", CapturedBy: "browser"}
+	captured := BridgeRequestRecord{ID: pending.ID, PairingID: pending.PairingID, Status: "captured", ExpiresAt: expiresAt, Payload: []byte(`{"status":"captured","external_post_id":"captured-post"}`)}
+	if _, err = store.CreateExternalPostAndBridgeRequest(ctx, post, captured); err == nil {
+		t.Fatal("forced request update failure was ignored")
+	}
+	posts, err := store.ListExternalPosts(ctx, topic.ID)
+	if err != nil || len(posts) != 0 {
+		t.Fatalf("external post was not rolled back: %+v %v", posts, err)
+	}
+	requests, err := store.ListBridgeRequests(ctx)
+	if err != nil || len(requests) != 1 || requests[0].Status != "pending" || string(requests[0].Payload) != string(pending.Payload) {
+		t.Fatalf("pending request changed after rollback: %+v %v", requests, err)
+	}
+	if _, err = store.DB.ExecContext(ctx, `DROP TRIGGER reject_capture_request`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CreateExternalPostAndBridgeRequest(ctx, post, captured); err != nil {
+		t.Fatal(err)
+	}
+	secondPost := post
+	secondPost.ID = "captured-post-2"
+	secondCapture := captured
+	secondCapture.Payload = []byte(`{"status":"captured","external_post_id":"captured-post-2"}`)
+	if _, err = store.CreateExternalPostAndBridgeRequest(ctx, secondPost, secondCapture); !errors.Is(err, ErrConflict) {
+		t.Fatalf("repeated request should conflict without duplicating the post: %v", err)
+	}
+	posts, err = store.ListExternalPosts(ctx, topic.ID)
+	if err != nil || len(posts) != 1 || posts[0].ID != post.ID {
+		t.Fatalf("captured posts=%+v err=%v", posts, err)
+	}
+}
+
+func TestPublicationStatusValidationAndTransitions(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "mastodon", Name: "main"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "topic"})
+	variant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	if _, err = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "typo"}); err == nil {
+		t.Fatal("unknown publication status was accepted")
+	}
+	published, err := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: PublicationPublished})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published.Status = PublicationFailed
+	if err = store.UpdatePublication(ctx, published); !errors.Is(err, ErrConflict) {
+		t.Fatalf("terminal publication transition error=%v", err)
+	}
+}
+
+func TestOperationalSummariesIncludeTopicProgressAndPublicationContext(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	profile, _ := store.CreateProfile(ctx, Profile{Name: "p"})
+	account, _ := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "mastodon", Name: "main"})
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: "Campaign"})
+	publishedVariant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+	publishedVariant.Text = "published body"
+	if publishedVariant, err = store.UpdateVariant(ctx, publishedVariant); err != nil {
+		t.Fatal(err)
+	}
+	waitingVariant, _ := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, publishedVariant.ID)
+	if _, err = store.CreatePublication(ctx, Publication{VariantID: publishedVariant.ID, AccountID: account.ID, Status: "published"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CreatePublication(ctx, Publication{VariantID: waitingVariant.ID, AccountID: account.ID, Status: "needs_confirmation"}); err != nil {
+		t.Fatal(err)
+	}
+	publishedVariant, err = store.GetVariant(ctx, publishedVariant.ID)
+	if err != nil || !publishedVariant.Published || !publishedVariant.PublicationLocked || publishedVariant.PublicationStatus != "published" {
+		t.Fatalf("successful publication state missing: %+v %v", publishedVariant, err)
+	}
+	waitingVariant, err = store.GetVariant(ctx, waitingVariant.ID)
+	if err != nil || waitingVariant.Published || !waitingVariant.PublicationLocked || waitingVariant.PublicationStatus != "needs_confirmation" {
+		t.Fatalf("unresolved publication state confused with success: %+v %v", waitingVariant, err)
+	}
+
+	topics, err := store.ListTopicSummaries(ctx, profile.ID)
+	if err != nil || len(topics) != 1 {
+		t.Fatalf("topic summaries: %+v %v", topics, err)
+	}
+	if topics[0].TargetCount != 2 || topics[0].PublishedCount != 1 || topics[0].NeedsActionCount != 1 || len(topics[0].Platforms) != 1 || topics[0].Platforms[0] != "mastodon" {
+		t.Fatalf("unexpected topic progress: %+v", topics[0])
+	}
+	publications, err := store.ListPublicationSummaries(ctx)
+	if err != nil || len(publications) != 2 {
+		t.Fatalf("publication summaries: %+v %v", publications, err)
+	}
+	if publications[0].Status != "needs_confirmation" || publications[0].TopicID != topic.ID || publications[0].TopicTitle != topic.Title {
+		t.Fatalf("actionable publication should be first and contextual: %+v", publications[0])
+	}
+	if publications[1].Text != "published body" {
+		t.Fatalf("publication text snapshot context missing: %+v", publications[1])
+	}
+}
+
+func TestPublicationListsAndStatusSummaryAreProfileScoped(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	createPublication := func(profile Profile, name, status string) Publication {
+		account, createErr := store.CreateAccount(ctx, Account{ProfileID: profile.ID, Platform: "mastodon", Name: name})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		topic, createErr := store.CreateTopic(ctx, Topic{ProfileID: profile.ID, Title: name})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		variant, createErr := store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		publication, createErr := store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: status})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return publication
+	}
+	first, err := store.CreateProfile(ctx, Profile{Name: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateProfile(ctx, Profile{Name: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := createPublication(first, "first-failure", PublicationFailed)
+	createPublication(first, "first-confirmation", PublicationNeedsConfirmation)
+	secondFailure := createPublication(second, "second-failure", PublicationFailed)
+
+	rows, err := store.ListPublicationSummariesForProfile(ctx, first.ID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("first profile publications=%+v err=%v", rows, err)
+	}
+	for _, row := range rows {
+		if row.ID == secondFailure.ID {
+			t.Fatalf("second profile publication leaked into first profile: %+v", row)
+		}
+	}
+	if rows[0].ID != failed.ID && rows[1].ID != failed.ID {
+		t.Fatalf("first profile failure missing: %+v", rows)
+	}
+	summary, err := store.PublicationStatusSummary(ctx, first.ID)
+	if err != nil || summary.ActionCount != 2 || summary.FailedCount != 1 {
+		t.Fatalf("first profile summary=%+v err=%v", summary, err)
+	}
+	secondSummary, err := store.PublicationStatusSummary(ctx, second.ID)
+	if err != nil || secondSummary.ActionCount != 1 || secondSummary.FailedCount != 1 {
+		t.Fatalf("second profile summary=%+v err=%v", secondSummary, err)
+	}
+	unknown, err := store.PublicationStatusSummary(ctx, "missing")
+	if err != nil || unknown.ActionCount != 0 || unknown.FailedCount != 0 {
+		t.Fatalf("unknown profile summary=%+v err=%v", unknown, err)
+	}
+}
+
 func TestStoreCoreAndVariantRelations(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -258,7 +446,7 @@ func TestPublicationHistoryLocksVariantAndHistoricalMedia(t *testing.T) {
 	_, _ = store.CreatePublication(ctx, Publication{VariantID: variant.ID, AccountID: account.ID, Status: "failed"})
 
 	locked, err := store.GetVariant(ctx, variant.ID)
-	if err != nil || !locked.Published {
+	if err != nil || locked.Published || !locked.PublicationLocked || locked.PublicationStatus != "failed" {
 		t.Fatalf("publication-derived field missing: %+v %v", locked, err)
 	}
 	locked.Text = "rewrite history"
@@ -583,6 +771,53 @@ func TestCreateAccountReactivatesMatchingDisabledRemoteIdentity(t *testing.T) {
 	}
 	if restored.ID != original.ID || restored.Disabled || restored.Name != "new" || restored.CredentialRef != "new-ref" {
 		t.Fatalf("account was not reactivated in place: %+v", restored)
+	}
+}
+
+func TestAccountCanBeAttachedToAnotherProfileWithoutDuplicatingConnection(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _ := store.CreateProfile(ctx, Profile{Name: "first"})
+	second, _ := store.CreateProfile(ctx, Profile{Name: "second"})
+	account, err := store.CreateAccount(ctx, Account{ProfileID: first.ID, Platform: "mastodon", Name: "shared", CredentialRef: "one-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached, err := store.AttachAccount(ctx, second.ID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attached.ProfileIDs) != 2 || attached.CredentialRef != "one-secret" {
+		t.Fatalf("attached account=%+v", attached)
+	}
+	listed, err := store.ListAccounts(ctx, second.ID)
+	if err != nil || len(listed) != 1 || listed[0].ID != account.ID {
+		t.Fatalf("second profile accounts=%+v err=%v", listed, err)
+	}
+	topic, _ := store.CreateTopic(ctx, Topic{ProfileID: second.ID, Title: "shared target"})
+	if _, err = store.CreateVariant(ctx, Variant{TopicID: topic.ID, AccountID: account.ID}, ""); err != nil {
+		t.Fatalf("attached account was not usable: %v", err)
+	}
+	if _, err = store.CreateExternalPost(ctx, ExternalPost{TopicID: topic.ID, AccountID: account.ID, Platform: account.Platform, URL: "https://example.test/post/1"}); err != nil {
+		t.Fatalf("attached account could not store an external post: %v", err)
+	}
+}
+
+func TestAccountBelongsToTopicReturnsDatabaseErrors(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.AccountBelongsToTopic(ctx, "topic", "account"); err == nil {
+		t.Fatal("membership lookup must preserve database errors")
 	}
 }
 

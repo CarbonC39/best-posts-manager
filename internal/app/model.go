@@ -12,11 +12,14 @@ type Profile struct {
 type Account struct {
 	ID        string `json:"id"`
 	ProfileID string `json:"profile_id"`
-	Platform  string `json:"platform"`
-	Name      string `json:"name"`
-	RemoteID  string `json:"remote_id"`
-	BaseURL   string `json:"base_url"`
-	TokenEnv  string `json:"token_env"`
+	// ProfileIDs is the set of workspaces that may use this connection. ProfileID
+	// remains the original owner for backwards-compatible local data.
+	ProfileIDs []string `json:"profile_ids,omitempty"`
+	Platform   string   `json:"platform"`
+	Name       string   `json:"name"`
+	RemoteID   string   `json:"remote_id"`
+	BaseURL    string   `json:"base_url"`
+	TokenEnv   string   `json:"token_env"`
 	// CredentialRef is an internal pointer into the local credential store. It
 	// must never cross the HTTP/CLI JSON boundary.
 	CredentialRef string    `json:"-"`
@@ -31,6 +34,17 @@ type Topic struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// TopicSummary is the lightweight operational view used by topic lists. Counts
+// are derived from persisted variants and publications rather than UI guesses.
+type TopicSummary struct {
+	Topic
+	TargetCount      int      `json:"target_count"`
+	PublishedCount   int      `json:"published_count"`
+	NeedsActionCount int      `json:"needs_action_count"`
+	InProgressCount  int      `json:"in_progress_count"`
+	Platforms        []string `json:"platforms"`
+}
 type BaseDraft struct {
 	ID        string    `json:"id"`
 	TopicID   string    `json:"topic_id"`
@@ -41,21 +55,23 @@ type BaseDraft struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 type Variant struct {
-	ID             string    `json:"id"`
-	TopicID        string    `json:"topic_id"`
-	AccountID      string    `json:"account_id"`
-	Text           string    `json:"text"`
-	Format         string    `json:"format"`
-	Status         string    `json:"status"`
-	Relation       string    `json:"relation"`
-	SourceRevision string    `json:"source_revision"`
-	Visibility     string    `json:"visibility"`
-	SpoilerText    string    `json:"spoiler_text"`
-	LocalOnly      bool      `json:"local_only"`
-	Outdated       bool      `json:"outdated"`
-	Published      bool      `json:"published"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	TopicID           string    `json:"topic_id"`
+	AccountID         string    `json:"account_id"`
+	Text              string    `json:"text"`
+	Format            string    `json:"format"`
+	Status            string    `json:"status"`
+	Relation          string    `json:"relation"`
+	SourceRevision    string    `json:"source_revision"`
+	Visibility        string    `json:"visibility"`
+	SpoilerText       string    `json:"spoiler_text"`
+	LocalOnly         bool      `json:"local_only"`
+	Outdated          bool      `json:"outdated"`
+	Published         bool      `json:"published"`
+	PublicationLocked bool      `json:"publication_locked"`
+	PublicationStatus string    `json:"publication_status"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 type Media struct {
 	ID        string    `json:"id"`
@@ -84,6 +100,69 @@ type Publication struct {
 	Source         string    `json:"source"`
 	PublishedAt    time.Time `json:"published_at"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+const (
+	PublicationPending           = "pending"
+	PublicationPublishing        = "publishing"
+	PublicationNeedsConfirmation = "needs_confirmation"
+	PublicationFailed            = "failed"
+	PublicationPublished         = "published"
+	PublicationCancelled         = "cancelled"
+)
+
+// ValidPublicationStatus and CanTransitionPublication keep publication state
+// rules in one place while preserving the string-valued JSON contract.
+func ValidPublicationStatus(status string) bool {
+	switch status {
+	case PublicationPending, PublicationPublishing, PublicationNeedsConfirmation,
+		PublicationFailed, PublicationPublished, PublicationCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func CanTransitionPublication(from, to string) bool {
+	if from == to {
+		return ValidPublicationStatus(to)
+	}
+	switch from {
+	case PublicationPending:
+		return to == PublicationPublishing || to == PublicationFailed || to == PublicationNeedsConfirmation || to == PublicationCancelled
+	case PublicationPublishing:
+		return to == PublicationPublished || to == PublicationFailed || to == PublicationNeedsConfirmation
+	case PublicationNeedsConfirmation:
+		return to == PublicationPublished || to == PublicationFailed || to == PublicationCancelled
+	case PublicationFailed:
+		return to == PublicationPublishing
+	default:
+		return false
+	}
+}
+
+// BridgeRequestRecord stores a protocol payload without coupling app storage
+// to the bridge package.
+type BridgeRequestRecord struct {
+	ID        string
+	PairingID string
+	Status    string
+	ExpiresAt time.Time
+	Payload   []byte
+}
+
+// PublicationSummary keeps the immutable publication record while adding the
+// topic context needed to identify and resolve it in the publishing center.
+type PublicationSummary struct {
+	Publication
+	TopicID    string `json:"topic_id"`
+	TopicTitle string `json:"topic_title"`
+	Text       string `json:"text"`
+}
+
+type PublicationStatusSummary struct {
+	ActionCount int `json:"action_count"`
+	FailedCount int `json:"failed_count"`
 }
 type ExternalPost struct {
 	ID               string          `json:"id"`

@@ -312,9 +312,13 @@ func TestOfficialImportDispatchesWithoutWebScrapeFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	p, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
-	a, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "misskey", Name: "m", BaseURL: ts.URL, TokenEnv: "MISSKEY_TOKEN"})
-	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p.ID, Title: "t"})
+	owner, _ := st.CreateProfile(ctx, app.Profile{Name: "owner"})
+	workspace, _ := st.CreateProfile(ctx, app.Profile{Name: "workspace"})
+	a, _ := st.CreateAccount(ctx, app.Account{ProfileID: owner.ID, Platform: "misskey", Name: "m", BaseURL: ts.URL, TokenEnv: "MISSKEY_TOKEN"})
+	if _, err = st.AttachAccount(ctx, workspace.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: workspace.ID, Title: "t"})
 	post, err := New(st).ImportExternal(ctx, topic.ID, a.ID, ts.URL+"/notes/n1")
 	if err != nil || post.CapturedBy != "official_api" || post.TextSnapshot != "MFM snapshot" {
 		t.Fatalf("official import failed: %+v %v", post, err)
@@ -340,10 +344,14 @@ func TestTranslateCreatesTraceableDetachedVariantWithoutChangingSource(t *testin
 		t.Fatal(err)
 	}
 	defer st.Close()
-	p, _ := st.CreateProfile(ctx, app.Profile{Name: "p"})
-	sourceAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "mastodon", Name: "source"})
-	targetAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: p.ID, Platform: "mastodon", Name: "target"})
-	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: p.ID, Title: "translation"})
+	workspace, _ := st.CreateProfile(ctx, app.Profile{Name: "workspace"})
+	other, _ := st.CreateProfile(ctx, app.Profile{Name: "other"})
+	sourceAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: workspace.ID, Platform: "mastodon", Name: "source"})
+	targetAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: other.ID, Platform: "mastodon", Name: "target"})
+	if _, err = st.AttachAccount(ctx, workspace.ID, targetAccount.ID); err != nil {
+		t.Fatal(err)
+	}
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: workspace.ID, Title: "translation"})
 	_, _ = st.UpdateBaseDraft(ctx, app.BaseDraft{TopicID: topic.ID, Text: "original", Language: "en"})
 	source, _ := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: sourceAccount.ID}, "")
 	config, err := st.CreateTranslationConfig(ctx, app.TranslationConfig{Provider: "openai", BaseURL: ts.URL, TokenEnv: "TRANSLATE_TOKEN", Model: "fake"})
@@ -363,6 +371,44 @@ func TestTranslateCreatesTraceableDetachedVariantWithoutChangingSource(t *testin
 	}
 	if records, err := st.ListTranslations(ctx); err != nil || len(records) != 1 {
 		t.Fatalf("translation record was not persisted: %v %v", records, err)
+	}
+}
+
+func TestTranslateRejectsUnattachedTargetBeforeProviderCall(t *testing.T) {
+	t.Setenv("TRANSLATE_TOKEN", "secret")
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+	ctx := context.Background()
+	st, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	owner, _ := st.CreateProfile(ctx, app.Profile{Name: "owner"})
+	workspace, _ := st.CreateProfile(ctx, app.Profile{Name: "workspace"})
+	sourceAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: owner.ID, Platform: "mastodon", Name: "source"})
+	targetAccount, _ := st.CreateAccount(ctx, app.Account{ProfileID: owner.ID, Platform: "mastodon", Name: "target"})
+	if _, err = st.AttachAccount(ctx, workspace.ID, sourceAccount.ID); err != nil {
+		t.Fatal(err)
+	}
+	topic, _ := st.CreateTopic(ctx, app.Topic{ProfileID: workspace.ID, Title: "translation"})
+	source, err := st.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: sourceAccount.ID}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := st.CreateTranslationConfig(ctx, app.TranslationConfig{Provider: "openai", BaseURL: ts.URL, TokenEnv: "TRANSLATE_TOKEN", Model: "fake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = New(st).Translate(ctx, TranslationRequest{SourceVariantID: source.ID, TargetAccountID: targetAccount.ID, TargetLanguage: "zh", ConfigID: config.ID}); err == nil {
+		t.Fatal("unattached translation target must fail")
+	}
+	if called {
+		t.Fatal("unattached translation target must be rejected before calling the provider")
 	}
 }
 

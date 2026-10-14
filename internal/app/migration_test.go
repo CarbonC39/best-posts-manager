@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestV1DatabaseMigratesToV8WithoutDataLoss(t *testing.T) {
+func TestV1DatabaseMigratesToV10WithoutDataLoss(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
 	if err != nil {
@@ -32,7 +32,7 @@ func TestV1DatabaseMigratesToV8WithoutDataLoss(t *testing.T) {
 		t.Fatalf("unexpected migrated local_only: %d", local)
 	}
 	var version int
-	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
+	if err = st.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 10 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	var pairings int
@@ -56,6 +56,36 @@ func TestV1DatabaseMigratesToV8WithoutDataLoss(t *testing.T) {
 		if err != nil {
 			t.Fatalf("credential_ref column was not migrated: %v", err)
 		}
+	}
+	var links int
+	if err = st.DB.QueryRow(`SELECT count(*) FROM profile_accounts`).Scan(&links); err != nil || links != 0 {
+		t.Fatalf("profile account migration failed: %d %v", links, err)
+	}
+}
+
+func TestV9DatabaseMigratesBridgeRequests(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(9);`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version, tables int
+	if err = store.DB.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 10 {
+		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+	if err = store.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bridge_requests'`).Scan(&tables); err != nil || tables != 1 {
+		t.Fatalf("bridge request migration failed: %d %v", tables, err)
 	}
 }
 
@@ -184,5 +214,29 @@ func TestV8MigrationFailureRollsBackBridgeTable(t *testing.T) {
 	}
 	if err = check.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bridge_pairings'`).Scan(&tables); err != nil || tables != 0 {
 		t.Fatalf("partial bridge migration: %d %v", tables, err)
+	}
+}
+
+func TestV8DatabaseSeedsProfileAccountLinks(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "best-post-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(8); CREATE TABLE profiles(id TEXT PRIMARY KEY, name TEXT NOT NULL, default_language TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL); CREATE TABLE accounts(id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id), platform TEXT NOT NULL, name TEXT NOT NULL, remote_id TEXT NOT NULL DEFAULT '', base_url TEXT NOT NULL DEFAULT '', token_env TEXT NOT NULL DEFAULT '', credential_ref TEXT NOT NULL DEFAULT '', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL); INSERT INTO profiles VALUES('p1','one','','','now'); INSERT INTO accounts VALUES('a1','p1','mastodon','shared','','','','',0,'now');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var profileID string
+	if err = store.DB.QueryRow(`SELECT profile_id FROM profile_accounts WHERE account_id='a1'`).Scan(&profileID); err != nil || profileID != "p1" {
+		t.Fatalf("seeded profile link=%q err=%v", profileID, err)
 	}
 }

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime"
 	"net/http"
 	"net/url"
@@ -12,13 +13,17 @@ import (
 	"best-post-manager/internal/bridge"
 )
 
-func (s *Server) bridgeManager() *bridge.Manager {
+func (s *Server) bridgeManager() (*bridge.Manager, error) {
 	s.bridgeMu.Lock()
 	defer s.bridgeMu.Unlock()
 	if s.Bridge == nil {
-		s.Bridge = bridge.NewManager(s.Svc.Store)
+		manager, err := bridge.NewManager(s.Svc.Store)
+		if err != nil {
+			return nil, err
+		}
+		s.Bridge = manager
 	}
-	return s.Bridge
+	return s.Bridge, nil
 }
 
 func (s *Server) bridgeAdmin(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +40,11 @@ func (s *Server) bridgeAdmin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnsupportedMediaType, errors.New("bridge requests require application/json"))
 		return
 	}
-	b := s.bridgeManager()
+	b, err := s.bridgeManager()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("initialize browser bridge: %w", err))
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/bridge/")
 	if path == "pairings" {
 		if r.Method == http.MethodGet {
@@ -167,7 +176,11 @@ func decodeBridge(w http.ResponseWriter, r *http.Request, value any) bool {
 	return false
 }
 func (s *Server) bridgeScript(w http.ResponseWriter, r *http.Request) {
-	b := s.bridgeManager()
+	b, err := s.bridgeManager()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("initialize browser bridge: %w", err))
+		return
+	}
 	if r.ContentLength > bridge.MaxBodyBytes {
 		fail(w, 413, errors.New("bridge request body is too large"))
 		return

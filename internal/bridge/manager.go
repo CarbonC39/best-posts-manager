@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -91,16 +92,107 @@ type Request struct {
 	ExpiresAt        time.Time `json:"expires_at"`
 }
 
-func NewManager(s *app.Store) *Manager {
+func NewManager(s *app.Store) (*Manager, error) {
 	m := &Manager{Store: s, Now: time.Now, pairs: make(map[string]*pairing), requests: make(map[string]*Request)}
-	if s != nil {
-		if persisted, err := s.ListBridgePairings(context.Background()); err == nil {
-			for _, saved := range persisted {
-				m.pairs[saved.ID] = &pairing{ID: saved.ID, Platform: saved.Platform, TokenHash: saved.TokenHash, TokenExpiresAt: saved.TokenExpiresAt, Revoked: saved.Revoked, CodeUsed: saved.TokenHash != ""}
-			}
-		}
+	if s == nil {
+		return m, nil
 	}
-	return m
+	persistedPairings, err := s.ListBridgePairings(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("load bridge pairings: %w", err)
+	}
+	for _, saved := range persistedPairings {
+		if err = validatePersistedPairing(saved); err != nil {
+			return nil, fmt.Errorf("load bridge pairing %q: %w", saved.ID, err)
+		}
+		m.pairs[saved.ID] = &pairing{ID: saved.ID, Platform: saved.Platform, TokenHash: saved.TokenHash, TokenExpiresAt: saved.TokenExpiresAt, Revoked: saved.Revoked, CodeUsed: true}
+	}
+	persistedRequests, err := s.ListBridgeRequests(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("load bridge requests: %w", err)
+	}
+	for _, saved := range persistedRequests {
+		var request Request
+		if err = json.Unmarshal(saved.Payload, &request); err != nil {
+			return nil, fmt.Errorf("load bridge request %q payload: %w", saved.ID, err)
+		}
+		if err = validatePersistedRequest(saved, request); err != nil {
+			return nil, fmt.Errorf("load bridge request %q: %w", saved.ID, err)
+		}
+		m.requests[request.ID] = &request
+	}
+	return m, nil
+}
+
+func validatePersistedPairing(saved app.BridgePairing) error {
+	if strings.TrimSpace(saved.ID) == "" || !supported[saved.Platform] {
+		return errors.New("invalid id or platform")
+	}
+	hashBytes, err := hex.DecodeString(saved.TokenHash)
+	if err != nil || len(hashBytes) != sha256.Size {
+		return errors.New("invalid token hash")
+	}
+	if saved.TokenExpiresAt.IsZero() || saved.CreatedAt.IsZero() || !saved.TokenExpiresAt.After(saved.CreatedAt) {
+		return errors.New("invalid lifecycle time")
+	}
+	return nil
+}
+
+func validatePersistedRequest(saved app.BridgeRequestRecord, request Request) error {
+	if strings.TrimSpace(saved.ID) == "" || strings.TrimSpace(saved.PairingID) == "" || strings.TrimSpace(saved.Status) == "" || saved.ExpiresAt.IsZero() {
+		return errors.New("invalid storage metadata")
+	}
+	if request.ID != saved.ID || request.RequestID != saved.ID || request.PairingID != saved.PairingID || request.Status != saved.Status || !request.ExpiresAt.Equal(saved.ExpiresAt) {
+		return errors.New("storage metadata does not match payload")
+	}
+	if request.Version != ProtocolVersion || request.Type != request.Kind || !supported[request.Platform] || request.CreatedAt.IsZero() || !request.ExpiresAt.After(request.CreatedAt) {
+		return errors.New("invalid protocol, platform, or lifecycle")
+	}
+	if !AllowedPage(request.Platform, request.PageURL) || len([]byte(request.Text)) > MaxTextBytes || len(request.Media) > MaxMedia {
+		return errors.New("invalid page or payload limits")
+	}
+	switch request.Kind {
+	case "fill":
+		if request.TopicID == "" || request.AccountID == "" || request.VariantID == "" || request.PublicationID == "" {
+			return errors.New("fill request is missing associations")
+		}
+		switch request.Status {
+		case "pending", "filled", "needs_confirmation":
+		case "published":
+			if request.ResultURL == "" && request.RemoteID == "" {
+				return errors.New("published request is missing its result")
+			}
+			if request.ResultURL != "" && !AllowedResultURL(request.Platform, request.ResultURL) {
+				return errors.New("published request has an invalid result URL")
+			}
+		case "error":
+			if strings.TrimSpace(request.Error) == "" {
+				return errors.New("failed request is missing its error")
+			}
+		default:
+			return errors.New("invalid fill request status")
+		}
+	case "capture":
+		if request.TopicID == "" || request.AccountID == "" || request.VariantID != "" || request.PublicationID != "" {
+			return errors.New("capture request has invalid associations")
+		}
+		switch request.Status {
+		case "pending", "expired":
+		case "captured":
+			if request.ExternalPostID == "" {
+				return errors.New("captured request is missing its external post")
+			}
+		case "error":
+			if strings.TrimSpace(request.Error) == "" {
+				return errors.New("failed request is missing its error")
+			}
+		default:
+			return errors.New("invalid capture request status")
+		}
+	default:
+		return errors.New("invalid request kind")
+	}
+	return nil
 }
 func randomValue(n int) string {
 	b := make([]byte, n)
@@ -310,11 +402,20 @@ func (m *Manager) CreateFillWithOptions(ctx context.Context, pairingID, variantI
 	if len([]byte(v.Text)) > MaxTextBytes {
 		return Request{}, errors.New("bridge text exceeds request limit")
 	}
-	p, err := m.Store.CreatePublication(ctx, app.Publication{VariantID: v.ID, AccountID: a.ID, Status: "needs_confirmation", Source: "bridge"})
+	now := m.Now().UTC()
+	p := app.Publication{ID: randomValue(12), VariantID: v.ID, AccountID: a.ID, Status: app.PublicationNeedsConfirmation, Source: "bridge", CreatedAt: now}
+	r := m.prepareRequest(Request{Kind: "fill", PairingID: pairingID, Platform: a.Platform, AccountID: a.ID, TopicID: v.TopicID, VariantID: v.ID, PublicationID: p.ID, PageURL: pageURL, Text: v.Text, Media: selected, AutoPublish: autoPublish, Status: "pending"})
+	record, err := bridgeRequestRecord(r)
 	if err != nil {
 		return Request{}, err
 	}
-	return m.saveRequest(Request{Kind: "fill", PairingID: pairingID, Platform: a.Platform, AccountID: a.ID, TopicID: v.TopicID, VariantID: v.ID, PublicationID: p.ID, PageURL: pageURL, Text: v.Text, Media: selected, AutoPublish: autoPublish, Status: "pending"})
+	if _, err = m.Store.CreateBridgePublicationRequest(ctx, p, record); err != nil {
+		return Request{}, err
+	}
+	m.mu.Lock()
+	m.requests[r.ID] = &r
+	m.mu.Unlock()
+	return r, nil
 }
 func (m *Manager) CreateCapture(ctx context.Context, pairingID, topicID, accountID, platform, pageURL string) (Request, error) {
 	pairPlatform, err := m.PairingPlatform(pairingID)
@@ -336,12 +437,16 @@ func (m *Manager) CreateCapture(ctx context.Context, pairingID, topicID, account
 	if err != nil {
 		return Request{}, err
 	}
-	if topic.ProfileID != a.ProfileID {
+	belongs, err := m.Store.AccountBelongsToTopic(ctx, topic.ID, a.ID)
+	if err != nil {
+		return Request{}, err
+	}
+	if !belongs {
 		return Request{}, errors.New("capture account must belong to the topic profile")
 	}
 	return m.saveRequest(Request{Kind: "capture", PairingID: pairingID, Platform: platform, AccountID: accountID, TopicID: topicID, PageURL: pageURL, Status: "pending"})
 }
-func (m *Manager) saveRequest(r Request) (Request, error) {
+func (m *Manager) prepareRequest(r Request) Request {
 	if r.ID == "" {
 		r.ID = randomValue(12)
 	}
@@ -355,6 +460,33 @@ func (m *Manager) saveRequest(r Request) (Request, error) {
 	now := m.Now()
 	r.CreatedAt = now
 	r.ExpiresAt = now.Add(RequestTTL)
+	return r
+}
+
+func bridgeRequestRecord(r Request) (app.BridgeRequestRecord, error) {
+	payload, err := json.Marshal(r)
+	if err != nil {
+		return app.BridgeRequestRecord{}, err
+	}
+	return app.BridgeRequestRecord{ID: r.ID, PairingID: r.PairingID, Status: r.Status, ExpiresAt: r.ExpiresAt, Payload: payload}, nil
+}
+
+func (m *Manager) persistRequest(ctx context.Context, r Request) error {
+	if m.Store == nil {
+		return nil
+	}
+	record, err := bridgeRequestRecord(r)
+	if err != nil {
+		return err
+	}
+	return m.Store.SaveBridgeRequest(ctx, record)
+}
+
+func (m *Manager) saveRequest(r Request) (Request, error) {
+	r = m.prepareRequest(r)
+	if err := m.persistRequest(context.Background(), r); err != nil {
+		return Request{}, err
+	}
 	m.mu.Lock()
 	m.requests[r.ID] = &r
 	m.mu.Unlock()
@@ -372,6 +504,9 @@ func (m *Manager) Request(id string) (Request, error) {
 			r.Status = "needs_confirmation"
 		} else {
 			r.Status = "expired"
+		}
+		if err := m.persistRequest(context.Background(), *r); err != nil {
+			return Request{}, err
 		}
 	}
 	return *r, nil
@@ -391,6 +526,7 @@ func (m *Manager) Pending(pairingID string) []Request {
 				} else {
 					r.Status = "expired"
 				}
+				_ = m.persistRequest(context.Background(), *r)
 				continue
 			}
 			out = append(out, *r)
@@ -423,6 +559,10 @@ func (m *Manager) Filled(id, warning string) (Request, error) {
 	}
 	r.Status = "filled"
 	r.Warning = strings.TrimSpace(warning)
+	if err := m.persistRequest(context.Background(), *r); err != nil {
+		r.Status, r.Warning = "pending", ""
+		return Request{}, err
+	}
 	return *r, nil
 }
 func (m *Manager) Result(ctx context.Context, id, resultURL, remoteID string) (Request, error) {
@@ -462,13 +602,20 @@ func (m *Manager) Result(ctx context.Context, id, resultURL, remoteID string) (R
 		m.mu.Unlock()
 		return Request{}, err
 	}
-	p.Status, p.RemoteURL, p.RemoteID, p.ErrorCategory, p.ErrorMessage = "published", resultURL, remoteID, "", ""
+	p.Status, p.RemoteURL, p.RemoteID, p.ErrorCategory, p.ErrorMessage = app.PublicationPublished, resultURL, remoteID, "", ""
 	p.PublishedAt = m.Now().UTC()
-	if err = m.Store.UpdatePublication(ctx, p); err != nil {
+	updated := *r
+	updated.Status, updated.ResultURL, updated.RemoteID = "published", resultURL, remoteID
+	record, err := bridgeRequestRecord(updated)
+	if err != nil {
 		m.mu.Unlock()
 		return Request{}, err
 	}
-	r.Status, r.ResultURL, r.RemoteID = "published", resultURL, remoteID
+	if err = m.Store.UpdatePublicationAndBridgeRequest(ctx, p, record); err != nil {
+		m.mu.Unlock()
+		return Request{}, err
+	}
+	*r = updated
 	out := *r
 	m.mu.Unlock()
 	return out, nil
@@ -499,13 +646,28 @@ func (m *Manager) Error(ctx context.Context, id, message string) (Request, error
 			m.mu.Unlock()
 			return Request{}, err
 		}
-		p.Status, p.ErrorCategory, p.ErrorMessage = "failed", "bridge", message
-		if err = m.Store.UpdatePublication(ctx, p); err != nil {
+		p.Status, p.ErrorCategory, p.ErrorMessage = app.PublicationFailed, "bridge", message
+		updated := *r
+		updated.Status, updated.Error = "error", message
+		record, recordErr := bridgeRequestRecord(updated)
+		if recordErr != nil {
+			m.mu.Unlock()
+			return Request{}, recordErr
+		}
+		if err = m.Store.UpdatePublicationAndBridgeRequest(ctx, p, record); err != nil {
 			m.mu.Unlock()
 			return Request{}, err
 		}
+		*r = updated
+	} else {
+		updated := *r
+		updated.Status, updated.Error = "error", message
+		if err := m.persistRequest(ctx, updated); err != nil {
+			m.mu.Unlock()
+			return Request{}, err
+		}
+		*r = updated
 	}
-	r.Status, r.Error = "error", message
 	out := *r
 	m.mu.Unlock()
 	return out, nil
@@ -546,15 +708,26 @@ func (m *Manager) Capture(ctx context.Context, id, textSnapshot, pageURL string,
 		m.mu.Unlock()
 		return Request{}, errors.New("capture text exceeds request limit")
 	}
-	post, err := m.Store.CreateExternalPost(ctx, app.ExternalPost{TopicID: r.TopicID, AccountID: r.AccountID, Platform: r.Platform, URL: pageURL, TextSnapshot: textSnapshot, MediaSnapshot: media, CapturedBy: "browser", Incomplete: incomplete, IncompleteReason: reason})
+	reason = strings.TrimSpace(reason)
+	if incomplete && reason == "" {
+		reason = "snapshot is incomplete"
+	}
+	post := app.ExternalPost{ID: randomValue(12), TopicID: r.TopicID, AccountID: r.AccountID, Platform: r.Platform, URL: pageURL, TextSnapshot: textSnapshot, MediaSnapshot: media, CapturedBy: "browser", Incomplete: incomplete, IncompleteReason: reason, CreatedAt: m.Now().UTC()}
+	updated := *r
+	updated.Status = "captured"
+	updated.Incomplete = incomplete
+	updated.IncompleteReason = reason
+	updated.ExternalPostID = post.ID
+	record, err := bridgeRequestRecord(updated)
 	if err != nil {
 		m.mu.Unlock()
 		return Request{}, err
 	}
-	r.Status = "captured"
-	r.Incomplete = incomplete
-	r.IncompleteReason = reason
-	r.ExternalPostID = post.ID
+	if _, err = m.Store.CreateExternalPostAndBridgeRequest(ctx, post, record); err != nil {
+		m.mu.Unlock()
+		return Request{}, err
+	}
+	*r = updated
 	out := *r
 	m.mu.Unlock()
 	return out, nil
@@ -592,7 +765,7 @@ func AllowedResultURL(platform, raw string) bool {
 	return true
 }
 func allowedHost(platform, h string) bool {
-	for _, suffix := range map[string][]string{"x": {"x.com", "twitter.com"}, "weibo": {"weibo.com"}, "xiaohongshu": {"xiaohongshu.com"}, "qzone": {"qzone.qq.com"}}[platform] {
+	for _, suffix := range map[string][]string{"x": {"x.com", "twitter.com"}, "weibo": {"weibo.com"}, "xiaohongshu": {"xiaohongshu.com", "rednote.com"}, "qzone": {"qzone.qq.com"}}[platform] {
 		if h == suffix || strings.HasSuffix(h, "."+suffix) {
 			return true
 		}

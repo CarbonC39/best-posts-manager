@@ -208,13 +208,88 @@ CREATE TABLE IF NOT EXISTS external_posts (id TEXT PRIMARY KEY, topic_id TEXT NO
 		}
 		rollback = false
 	}
+	if version < 9 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, txErr = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS profile_accounts (profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, created_at TEXT NOT NULL, PRIMARY KEY(profile_id,account_id))`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO profile_accounts(profile_id,account_id,created_at) SELECT profile_id,id,created_at FROM accounts`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(9)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
+	if version < 10 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, txErr = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS bridge_requests (id TEXT PRIMARY KEY, pairing_id TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS bridge_requests_pairing_status ON bridge_requests(pairing_id,status)`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(10)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
+	if version < 11 {
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, txErr = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS media_orders (topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, variant_id TEXT NOT NULL DEFAULT '', media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE, position INTEGER NOT NULL, PRIMARY KEY(topic_id,variant_id,media_id))`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS media_orders_scope ON media_orders(topic_id,variant_id,position)`); txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES(11)`); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+		rollback = false
+	}
 	return nil
 }
 
 // RecoverPublishing makes an interrupted final publish visible to the user.
 // It deliberately never retries: the remote outcome may already be successful.
 func (s *Store) RecoverPublishing(ctx context.Context) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='needs_confirmation', error_category='unknown', error_message='程序重启时发布请求仍在进行；请到平台确认结果后再手动关联，勿盲目重试' WHERE status='publishing'`)
+	_, err := s.DB.ExecContext(ctx, `UPDATE publications SET status=?, error_category='unknown', error_message='程序重启时发布请求仍在进行；请到平台确认结果后再手动关联，勿盲目重试' WHERE status=?`, PublicationNeedsConfirmation, PublicationPublishing)
 	return err
 }
 
@@ -257,6 +332,37 @@ func (s *Store) RevokeBridgePairing(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) SaveBridgeRequest(ctx context.Context, request BridgeRequestRecord) error {
+	return saveBridgeRequest(ctx, s.DB, request)
+}
+
+func saveBridgeRequest(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, request BridgeRequestRecord) error {
+	_, err := exec.ExecContext(ctx, `INSERT INTO bridge_requests(id,pairing_id,status,expires_at,payload,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pairing_id=excluded.pairing_id,status=excluded.status,expires_at=excluded.expires_at,payload=excluded.payload`, request.ID, request.PairingID, request.Status, formatTime(request.ExpiresAt), string(request.Payload), now())
+	return err
+}
+
+func (s *Store) ListBridgeRequests(ctx context.Context) ([]BridgeRequestRecord, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,pairing_id,status,expires_at,payload FROM bridge_requests ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]BridgeRequestRecord, 0)
+	for rows.Next() {
+		var request BridgeRequestRecord
+		var expiresAt, payload string
+		if err = rows.Scan(&request.ID, &request.PairingID, &request.Status, &expiresAt, &payload); err != nil {
+			return nil, err
+		}
+		request.ExpiresAt = parseTime(expiresAt)
+		request.Payload = []byte(payload)
+		out = append(out, request)
+	}
+	return out, rows.Err()
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -345,8 +451,23 @@ func (s *Store) CreateAccount(ctx context.Context, a Account) (Account, error) {
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()
 	}
-	_, e := s.DB.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CredentialRef, boolInt(a.Disabled), a.CreatedAt.Format(time.RFC3339Nano))
-	return a, e
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return a, e
+	}
+	defer tx.Rollback()
+	stamp := a.CreatedAt.Format(time.RFC3339Nano)
+	if _, e = tx.ExecContext(ctx, `INSERT INTO accounts(id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, a.ID, a.ProfileID, a.Platform, a.Name, a.RemoteID, a.BaseURL, a.TokenEnv, a.CredentialRef, boolInt(a.Disabled), stamp); e != nil {
+		return a, e
+	}
+	if _, e = tx.ExecContext(ctx, `INSERT INTO profile_accounts(profile_id,account_id,created_at) VALUES(?,?,?)`, a.ProfileID, a.ID, stamp); e != nil {
+		return a, e
+	}
+	if e = tx.Commit(); e != nil {
+		return a, e
+	}
+	a.ProfileIDs = []string{a.ProfileID}
+	return a, nil
 }
 func supportedPlatform(name string) bool {
 	switch name {
@@ -357,13 +478,13 @@ func supportedPlatform(name string) bool {
 	}
 }
 func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, error) {
-	q := `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at FROM accounts`
+	q := `SELECT a.id,a.profile_id,a.platform,a.name,a.remote_id,a.base_url,a.token_env,a.credential_ref,a.disabled,a.created_at,COALESCE((SELECT group_concat(pa.profile_id) FROM profile_accounts pa WHERE pa.account_id=a.id),'') FROM accounts a`
 	var args []any
 	if profileID != "" {
-		q += ` WHERE profile_id=?`
+		q += ` WHERE EXISTS (SELECT 1 FROM profile_accounts pa WHERE pa.account_id=a.id AND pa.profile_id=?)`
 		args = append(args, profileID)
 	}
-	q += ` ORDER BY created_at`
+	q += ` ORDER BY a.created_at`
 	rows, e := s.DB.QueryContext(ctx, q, args...)
 	if e != nil {
 		return nil, e
@@ -373,12 +494,16 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 	for rows.Next() {
 		var a Account
 		var t string
+		var profileIDs string
 		var disabled int
-		if e = rows.Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &disabled, &t); e != nil {
+		if e = rows.Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &disabled, &t, &profileIDs); e != nil {
 			return nil, e
 		}
 		a.CreatedAt = parseTime(t)
 		a.Disabled = disabled != 0
+		if profileIDs != "" {
+			a.ProfileIDs = strings.Split(profileIDs, ",")
+		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -386,14 +511,35 @@ func (s *Store) ListAccounts(ctx context.Context, profileID string) ([]Account, 
 func (s *Store) GetAccount(ctx context.Context, aid string) (Account, error) {
 	var a Account
 	var t string
+	var profileIDs string
 	var disabled int
-	e := s.DB.QueryRowContext(ctx, `SELECT id,profile_id,platform,name,remote_id,base_url,token_env,credential_ref,disabled,created_at FROM accounts WHERE id=?`, aid).Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &disabled, &t)
+	e := s.DB.QueryRowContext(ctx, `SELECT a.id,a.profile_id,a.platform,a.name,a.remote_id,a.base_url,a.token_env,a.credential_ref,a.disabled,a.created_at,COALESCE((SELECT group_concat(pa.profile_id) FROM profile_accounts pa WHERE pa.account_id=a.id),'') FROM accounts a WHERE a.id=?`, aid).Scan(&a.ID, &a.ProfileID, &a.Platform, &a.Name, &a.RemoteID, &a.BaseURL, &a.TokenEnv, &a.CredentialRef, &disabled, &t, &profileIDs)
 	if e == sql.ErrNoRows {
 		e = ErrNotFound
 	}
 	a.CreatedAt = parseTime(t)
 	a.Disabled = disabled != 0
+	if profileIDs != "" {
+		a.ProfileIDs = strings.Split(profileIDs, ",")
+	}
 	return a, e
+}
+
+func (s *Store) AttachAccount(ctx context.Context, profileID, accountID string) (Account, error) {
+	if !s.profileExists(ctx, profileID) {
+		return Account{}, ErrNotFound
+	}
+	a, err := s.GetAccount(ctx, accountID)
+	if err != nil {
+		return Account{}, err
+	}
+	if a.Disabled {
+		return Account{}, fmt.Errorf("%w: a disabled account cannot be attached", ErrConflict)
+	}
+	if _, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO profile_accounts(profile_id,account_id,created_at) VALUES(?,?,?)`, profileID, accountID, now()); err != nil {
+		return Account{}, err
+	}
+	return s.GetAccount(ctx, accountID)
 }
 
 // UpdateAccountConnection atomically updates editable metadata and the
@@ -528,6 +674,43 @@ func (s *Store) ListTopics(ctx context.Context, profileID string) ([]Topic, erro
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) ListTopicSummaries(ctx context.Context, profileID string) ([]TopicSummary, error) {
+	q := `SELECT t.id,t.profile_id,t.title,t.status,t.created_at,t.updated_at,
+		(SELECT COUNT(*) FROM variants v WHERE v.topic_id=t.id),
+		(SELECT COUNT(*) FROM variants v WHERE v.topic_id=t.id AND EXISTS(SELECT 1 FROM publications p WHERE p.variant_id=v.id AND p.status='published')),
+		(SELECT COUNT(*) FROM publications p JOIN variants v ON v.id=p.variant_id WHERE v.topic_id=t.id AND p.status IN ('needs_confirmation','failed')),
+		(SELECT COUNT(*) FROM publications p JOIN variants v ON v.id=p.variant_id WHERE v.topic_id=t.id AND p.status IN ('pending','publishing')),
+		COALESCE((SELECT GROUP_CONCAT(DISTINCT a.platform) FROM variants v JOIN accounts a ON a.id=v.account_id WHERE v.topic_id=t.id),'')
+		FROM topics t`
+	var args []any
+	if profileID != "" {
+		q += ` WHERE t.profile_id=?`
+		args = append(args, profileID)
+	}
+	q += ` ORDER BY t.updated_at DESC`
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TopicSummary, 0)
+	for rows.Next() {
+		var item TopicSummary
+		var created, updated, platforms string
+		if err = rows.Scan(&item.ID, &item.ProfileID, &item.Title, &item.Status, &created, &updated, &item.TargetCount, &item.PublishedCount, &item.NeedsActionCount, &item.InProgressCount, &platforms); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseTime(created)
+		item.UpdatedAt = parseTime(updated)
+		item.Platforms = []string{}
+		if platforms != "" {
+			item.Platforms = strings.Split(platforms, ",")
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
 func (s *Store) GetTopic(ctx context.Context, tid string) (Topic, error) {
 	var t Topic
 	var c, u string
@@ -580,13 +763,17 @@ func (s *Store) UpdateBaseDraft(ctx context.Context, b BaseDraft) (BaseDraft, er
 	b.UpdatedAt = parseTime(stamp)
 	return b, nil
 }
-func (s *Store) accountTopicOK(ctx context.Context, topicID, accountID string) bool {
-	var x int
-	e := s.DB.QueryRowContext(ctx, `SELECT 1 FROM topics t JOIN accounts a ON a.profile_id=t.profile_id WHERE t.id=? AND a.id=?`, topicID, accountID).Scan(&x)
-	return e == nil
+func (s *Store) AccountBelongsToTopic(ctx context.Context, topicID, accountID string) (bool, error) {
+	var exists int
+	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM topics t JOIN profile_accounts pa ON pa.profile_id=t.profile_id WHERE t.id=? AND pa.account_id=?)`, topicID, accountID).Scan(&exists)
+	return exists != 0, err
 }
 func (s *Store) CreateVariant(ctx context.Context, v Variant, sourceVariantID string) (Variant, error) {
-	if !s.accountTopicOK(ctx, v.TopicID, v.AccountID) {
+	belongs, err := s.AccountBelongsToTopic(ctx, v.TopicID, v.AccountID)
+	if err != nil {
+		return v, err
+	}
+	if !belongs {
 		return v, ErrNotFound
 	}
 	account, e := s.GetAccount(ctx, v.AccountID)
@@ -624,10 +811,11 @@ func (s *Store) CreateVariant(ctx context.Context, v Variant, sourceVariantID st
 func (s *Store) getVariant(ctx context.Context, vid string) (Variant, error) {
 	var v Variant
 	var c, u string
-	var local, published int
-	e := s.DB.QueryRowContext(ctx, `SELECT v.id,v.topic_id,v.account_id,v.text,v.format,v.status,v.relation,v.source_revision,v.visibility,v.spoiler_text,v.local_only,v.created_at,v.updated_at,EXISTS(SELECT 1 FROM publications p WHERE p.variant_id=v.id) FROM variants v WHERE v.id=?`, vid).Scan(&v.ID, &v.TopicID, &v.AccountID, &v.Text, &v.Format, &v.Status, &v.Relation, &v.SourceRevision, &v.Visibility, &v.SpoilerText, &local, &c, &u, &published)
+	var local, published, publicationLocked int
+	e := s.DB.QueryRowContext(ctx, `SELECT v.id,v.topic_id,v.account_id,v.text,v.format,v.status,v.relation,v.source_revision,v.visibility,v.spoiler_text,v.local_only,v.created_at,v.updated_at,EXISTS(SELECT 1 FROM publications p WHERE p.variant_id=v.id AND p.status='published'),EXISTS(SELECT 1 FROM publications p WHERE p.variant_id=v.id),COALESCE((SELECT p.status FROM publications p WHERE p.variant_id=v.id ORDER BY p.created_at DESC LIMIT 1),'') FROM variants v WHERE v.id=?`, vid).Scan(&v.ID, &v.TopicID, &v.AccountID, &v.Text, &v.Format, &v.Status, &v.Relation, &v.SourceRevision, &v.Visibility, &v.SpoilerText, &local, &c, &u, &published, &publicationLocked, &v.PublicationStatus)
 	v.LocalOnly = local != 0
 	v.Published = published != 0
+	v.PublicationLocked = publicationLocked != 0
 	if e != nil {
 		if e == sql.ErrNoRows {
 			e = ErrNotFound
@@ -685,7 +873,7 @@ func (s *Store) UpdateVariant(ctx context.Context, v Variant) (Variant, error) {
 	if e != nil {
 		return v, e
 	}
-	if old.Published {
+	if old.PublicationLocked {
 		return old, fmt.Errorf("%w: this version has publication history; copy it to a new version before editing", ErrConflict)
 	}
 	if old.Relation == "linked" {
@@ -778,7 +966,7 @@ func (s *Store) ApplyVariantUpdate(ctx context.Context, vid string) (Variant, er
 	if e != nil {
 		return v, e
 	}
-	if v.Published {
+	if v.PublicationLocked {
 		return v, fmt.Errorf("%w: this version has publication history; copy it to a new version before applying draft changes", ErrConflict)
 	}
 	if v.Relation != "linked" {
@@ -837,7 +1025,7 @@ func (s *Store) AddMedia(ctx context.Context, m Media) (Media, error) {
 		if variant.TopicID != m.TopicID {
 			return m, fmt.Errorf("media variant must belong to the same topic")
 		}
-		if variant.Published {
+		if variant.PublicationLocked {
 			return m, fmt.Errorf("%w: this version has publication history; attach media to a new version instead", ErrConflict)
 		}
 	}
@@ -864,7 +1052,54 @@ func (s *Store) AddMedia(ctx context.Context, m Media) (Media, error) {
 	return m, e
 }
 func (s *Store) ListMedia(ctx context.Context, topicID string) ([]Media, error) {
-	rows, e := s.DB.QueryContext(ctx, `SELECT id,topic_id,COALESCE(variant_id,''),filename,mime,path,alt_text,size,width,height,created_at FROM media WHERE topic_id=? ORDER BY created_at`, topicID)
+	return s.listMedia(ctx, topicID, nil)
+}
+
+// ListMediaForVariant returns the media visible to a variant in its persisted
+// scope order. Media without a saved scope order retains the original stable
+// created_at/id order and follows any explicitly ordered items.
+func (s *Store) ListMediaForVariant(ctx context.Context, topicID, variantID string) ([]Media, error) {
+	if variantID != "" {
+		v, err := s.getVariant(ctx, variantID)
+		if err != nil {
+			return nil, err
+		}
+		if v.TopicID != topicID {
+			return nil, fmt.Errorf("media variant must belong to the same topic")
+		}
+	}
+	return s.listMedia(ctx, topicID, &variantID)
+}
+
+func (s *Store) listMedia(ctx context.Context, topicID string, variantID *string) ([]Media, error) {
+	query := `SELECT m.id,m.topic_id,COALESCE(m.variant_id,''),m.filename,m.mime,m.path,m.alt_text,m.size,m.width,m.height,m.created_at FROM media m WHERE m.topic_id=? ORDER BY m.created_at,m.id`
+	args := []any{topicID}
+	if variantID != nil {
+		if *variantID == "" {
+			query = `SELECT m.id,m.topic_id,COALESCE(m.variant_id,''),m.filename,m.mime,m.path,m.alt_text,m.size,m.width,m.height,m.created_at FROM media m LEFT JOIN media_orders o ON o.media_id=m.id AND o.topic_id=m.topic_id AND o.variant_id='' WHERE m.topic_id=? AND m.variant_id IS NULL ORDER BY CASE WHEN o.position IS NULL THEN 1 ELSE 0 END,o.position,m.created_at,m.id`
+		} else {
+			query = `SELECT m.id,m.topic_id,COALESCE(m.variant_id,''),m.filename,m.mime,m.path,m.alt_text,m.size,m.width,m.height,m.created_at
+FROM media m
+LEFT JOIN media_orders o ON o.media_id=m.id AND o.topic_id=m.topic_id AND o.variant_id=?
+LEFT JOIN media_orders base ON base.media_id=m.id AND base.topic_id=m.topic_id AND base.variant_id=''
+WHERE m.topic_id=? AND (m.variant_id IS NULL OR m.variant_id=?)
+ORDER BY
+CASE
+ WHEN o.position IS NOT NULL THEN 0
+ WHEN NOT EXISTS (SELECT 1 FROM media_orders scoped WHERE scoped.topic_id=m.topic_id AND scoped.variant_id=?) AND m.variant_id IS NULL AND base.position IS NOT NULL THEN 1
+ WHEN NOT EXISTS (SELECT 1 FROM media_orders scoped WHERE scoped.topic_id=m.topic_id AND scoped.variant_id=?) AND m.variant_id IS NULL THEN 2
+ WHEN NOT EXISTS (SELECT 1 FROM media_orders scoped WHERE scoped.topic_id=m.topic_id AND scoped.variant_id=?) THEN 3
+ ELSE 4
+END,
+CASE
+ WHEN o.position IS NOT NULL THEN o.position
+ WHEN NOT EXISTS (SELECT 1 FROM media_orders scoped WHERE scoped.topic_id=m.topic_id AND scoped.variant_id=?) AND base.position IS NOT NULL THEN base.position
+END,
+m.created_at,m.id`
+			args = []any{*variantID, topicID, *variantID, *variantID, *variantID, *variantID, *variantID}
+		}
+	}
+	rows, e := s.DB.QueryContext(ctx, query, args...)
 	if e != nil {
 		return nil, e
 	}
@@ -880,6 +1115,101 @@ func (s *Store) ListMedia(ctx context.Context, topicID string) ([]Media, error) 
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) UpdateMediaAltText(ctx context.Context, mediaID, altText string) (Media, error) {
+	result, err := s.DB.ExecContext(ctx, `UPDATE media SET alt_text=? WHERE id=?`, altText, mediaID)
+	if err != nil {
+		return Media{}, err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return Media{}, err
+	} else if count == 0 {
+		return Media{}, ErrNotFound
+	}
+	var media Media
+	var created string
+	err = s.DB.QueryRowContext(ctx, `SELECT id,topic_id,COALESCE(variant_id,''),filename,mime,path,alt_text,size,width,height,created_at FROM media WHERE id=?`, mediaID).Scan(&media.ID, &media.TopicID, &media.VariantID, &media.Filename, &media.MIME, &media.Path, &media.AltText, &media.Size, &media.Width, &media.Height, &created)
+	if err != nil {
+		return Media{}, err
+	}
+	media.CreatedAt = parseTime(created)
+	return media, nil
+}
+
+// ReorderMedia validates and atomically replaces one topic/variant scope's
+// complete order. Shared media may be ordered differently for each variant.
+func (s *Store) ReorderMedia(ctx context.Context, topicID, variantID string, mediaIDs []string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var topicExists int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM topics WHERE id=?`, topicID).Scan(&topicExists); err != nil {
+		return err
+	}
+	if topicExists == 0 {
+		return ErrNotFound
+	}
+	if variantID != "" {
+		var owner string
+		if err = tx.QueryRowContext(ctx, `SELECT topic_id FROM variants WHERE id=?`, variantID).Scan(&owner); err != nil {
+			if err == sql.ErrNoRows {
+				return ErrNotFound
+			}
+			return err
+		}
+		if owner != topicID {
+			return fmt.Errorf("media variant must belong to the same topic")
+		}
+	}
+	query := `SELECT id FROM media WHERE topic_id=? AND variant_id IS NULL`
+	args := []any{topicID}
+	if variantID != "" {
+		query = `SELECT id FROM media WHERE topic_id=? AND (variant_id IS NULL OR variant_id=?)`
+		args = append(args, variantID)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	expected := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		expected[id] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(mediaIDs) != len(expected) {
+		return fmt.Errorf("media order must include every media item in the collection exactly once")
+	}
+	seen := make(map[string]struct{}, len(mediaIDs))
+	for _, id := range mediaIDs {
+		if _, ok := expected[id]; !ok {
+			return fmt.Errorf("media order contains an item outside this collection")
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("media order contains duplicate items")
+		}
+		seen[id] = struct{}{}
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM media_orders WHERE topic_id=? AND variant_id=?`, topicID, variantID); err != nil {
+		return err
+	}
+	for position, id := range mediaIDs {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO media_orders(topic_id,variant_id,media_id,position) VALUES(?,?,?,?)`, topicID, variantID, id, position); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // DeleteMedia removes one local media record and its file. Files are accepted
@@ -1158,7 +1488,10 @@ func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publicati
 		p.ID = id()
 	}
 	if p.Status == "" {
-		p.Status = "pending"
+		p.Status = PublicationPending
+	}
+	if !ValidPublicationStatus(p.Status) {
+		return p, fmt.Errorf("invalid publication status %q", p.Status)
 	}
 	if p.Source == "" {
 		p.Source = "internal"
@@ -1175,7 +1508,7 @@ func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publicati
 		_, err := exec.ExecContext(ctx, `INSERT INTO publications(id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.VariantID, p.AccountID, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, p.IdempotencyKey, p.Source, "", p.CreatedAt.Format(time.RFC3339Nano))
 		return err
 	}
-	if p.Status != "pending" && p.Status != "publishing" && p.Status != "needs_confirmation" {
+	if p.Status != PublicationPending && p.Status != PublicationPublishing && p.Status != PublicationNeedsConfirmation {
 		return p, insert(s.DB)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -1196,19 +1529,110 @@ func (s *Store) CreatePublication(ctx context.Context, p Publication) (Publicati
 	return p, tx.Commit()
 }
 
+// CreateBridgePublicationRequest atomically records the publication marker and
+// the browser work item that can resolve it.
+func (s *Store) CreateBridgePublicationRequest(ctx context.Context, p Publication, request BridgeRequestRecord) (Publication, error) {
+	if p.ID == "" || p.VariantID == "" || p.AccountID == "" || p.Status != PublicationNeedsConfirmation || request.ID == "" || len(request.Payload) == 0 {
+		return p, errors.New("complete bridge publication and request data is required")
+	}
+	if p.Source == "" {
+		p.Source = "bridge"
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	if p.IdempotencyKey == "" {
+		p.IdempotencyKey = p.VariantID + ":" + p.AccountID + ":" + p.CreatedAt.Format(time.RFC3339Nano)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return p, err
+	}
+	defer tx.Rollback()
+	var unresolved int
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM publications WHERE variant_id=? AND status IN ('pending','publishing','needs_confirmation'))`, p.VariantID).Scan(&unresolved); err != nil {
+		return p, err
+	}
+	if unresolved != 0 {
+		return p, fmt.Errorf("%w: this version already has an unresolved publication", ErrConflict)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO publications(id,variant_id,account_id,status,remote_id,remote_url,remote_cid,error_category,error_message,idempotency_key,source,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.VariantID, p.AccountID, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, p.IdempotencyKey, p.Source, "", p.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		return p, err
+	}
+	if err = saveBridgeRequest(ctx, tx, request); err != nil {
+		return p, err
+	}
+	return p, tx.Commit()
+}
+
 func (s *Store) HasUnresolvedPublication(ctx context.Context, variantID string) (bool, error) {
 	var exists int
 	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM publications WHERE variant_id=? AND status IN ('pending','publishing','needs_confirmation'))`, variantID).Scan(&exists)
 	return exists != 0, err
 }
 func (s *Store) UpdatePublication(ctx context.Context, p Publication) error {
-	_, e := s.DB.ExecContext(ctx, `UPDATE publications SET status=?,remote_id=?,remote_url=?,remote_cid=?,error_category=?,error_message=?,published_at=? WHERE id=?`, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, formatTime(p.PublishedAt), p.ID)
-	return e
+	if !ValidPublicationStatus(p.Status) {
+		return fmt.Errorf("invalid publication status %q", p.Status)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = updatePublication(ctx, tx, p); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updatePublication(ctx context.Context, tx *sql.Tx, p Publication) error {
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM publications WHERE id=?`, p.ID).Scan(&current); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !CanTransitionPublication(current, p.Status) {
+		return fmt.Errorf("%w: publication cannot transition from %s to %s", ErrConflict, current, p.Status)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE publications SET status=?,remote_id=?,remote_url=?,remote_cid=?,error_category=?,error_message=?,published_at=? WHERE id=? AND status=?`, p.Status, p.RemoteID, p.RemoteURL, p.RemoteCID, p.ErrorCategory, p.ErrorMessage, formatTime(p.PublishedAt), p.ID, current)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("%w: publication status changed concurrently", ErrConflict)
+	}
+	return nil
+}
+
+// UpdatePublicationAndBridgeRequest commits the remotely visible outcome and
+// its bridge acknowledgement together.
+func (s *Store) UpdatePublicationAndBridgeRequest(ctx context.Context, p Publication, request BridgeRequestRecord) error {
+	if !ValidPublicationStatus(p.Status) {
+		return fmt.Errorf("invalid publication status %q", p.Status)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = updatePublication(ctx, tx, p); err != nil {
+		return err
+	}
+	if err = saveBridgeRequest(ctx, tx, request); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ConfirmPublication atomically resolves an unknown publication outcome.
 func (s *Store) ConfirmPublication(ctx context.Context, publicationID, remoteURL, remoteID string, publishedAt time.Time) (Publication, error) {
-	result, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='published',remote_id=?,remote_url=?,error_category='',error_message='',published_at=? WHERE id=? AND status='needs_confirmation'`, remoteID, remoteURL, formatTime(publishedAt), publicationID)
+	result, err := s.DB.ExecContext(ctx, `UPDATE publications SET status=?,remote_id=?,remote_url=?,error_category='',error_message='',published_at=? WHERE id=? AND status=?`, PublicationPublished, remoteID, remoteURL, formatTime(publishedAt), publicationID, PublicationNeedsConfirmation)
 	if err != nil {
 		return Publication{}, err
 	}
@@ -1228,7 +1652,7 @@ func (s *Store) ConfirmPublication(ctx context.Context, publicationID, remoteURL
 // CancelPublication records that the user checked the remote platform and
 // confirmed the unknown publish attempt did not create a post.
 func (s *Store) CancelPublication(ctx context.Context, publicationID string) (Publication, error) {
-	result, err := s.DB.ExecContext(ctx, `UPDATE publications SET status='cancelled',remote_id='',remote_url='',remote_cid='',error_category='',error_message='用户确认未发布',published_at='' WHERE id=? AND status='needs_confirmation'`, publicationID)
+	result, err := s.DB.ExecContext(ctx, `UPDATE publications SET status=?,remote_id='',remote_url='',remote_cid='',error_category='',error_message='用户确认未发布',published_at='' WHERE id=? AND status=?`, PublicationCancelled, publicationID, PublicationNeedsConfirmation)
 	if err != nil {
 		return Publication{}, err
 	}
@@ -1281,32 +1705,88 @@ func (s *Store) ListPublications(ctx context.Context) ([]Publication, error) {
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) ListPublicationSummaries(ctx context.Context) ([]PublicationSummary, error) {
+	return s.ListPublicationSummariesForProfile(ctx, "")
+}
+
+func (s *Store) ListPublicationSummariesForProfile(ctx context.Context, profileID string) ([]PublicationSummary, error) {
+	query := `SELECT p.id,p.variant_id,p.account_id,p.status,p.remote_id,p.remote_url,p.remote_cid,p.error_category,p.error_message,p.idempotency_key,p.source,p.published_at,p.created_at,t.id,t.title,v.text
+		FROM publications p JOIN variants v ON v.id=p.variant_id JOIN topics t ON t.id=v.topic_id`
+	var args []any
+	if profileID != "" {
+		query += ` WHERE t.profile_id=?`
+		args = append(args, profileID)
+	}
+	query += ` ORDER BY CASE WHEN p.status IN ('needs_confirmation','failed') THEN 0 WHEN p.status IN ('pending','publishing') THEN 1 ELSE 2 END,p.created_at DESC`
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]PublicationSummary, 0)
+	for rows.Next() {
+		var item PublicationSummary
+		var published, created string
+		if err = rows.Scan(&item.ID, &item.VariantID, &item.AccountID, &item.Status, &item.RemoteID, &item.RemoteURL, &item.RemoteCID, &item.ErrorCategory, &item.ErrorMessage, &item.IdempotencyKey, &item.Source, &published, &created, &item.TopicID, &item.TopicTitle, &item.Text); err != nil {
+			return nil, err
+		}
+		item.PublishedAt = parseTime(published)
+		item.CreatedAt = parseTime(created)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PublicationStatusSummary(ctx context.Context, profileID string) (PublicationStatusSummary, error) {
+	var summary PublicationStatusSummary
+	err := s.DB.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN p.status IN ('needs_confirmation','failed') THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN p.status='failed' THEN 1 ELSE 0 END),0)
+		FROM publications p
+		JOIN variants v ON v.id=p.variant_id
+		JOIN topics t ON t.id=v.topic_id
+		WHERE t.profile_id=?`, profileID).Scan(&summary.ActionCount, &summary.FailedCount)
+	return summary, err
+}
 func (s *Store) CreateExternalPost(ctx context.Context, p ExternalPost) (ExternalPost, error) {
+	p, mediaJSON, err := s.prepareExternalPost(ctx, p)
+	if err != nil {
+		return p, err
+	}
+	return p, insertExternalPost(ctx, s.DB, p, mediaJSON)
+}
+
+func (s *Store) prepareExternalPost(ctx context.Context, p ExternalPost) (ExternalPost, string, error) {
 	topic, e := s.GetTopic(ctx, p.TopicID)
 	if e != nil {
-		return p, e
+		return p, "", e
 	}
 	if strings.TrimSpace(p.Platform) == "" || (strings.TrimSpace(p.URL) == "" && strings.TrimSpace(p.RemoteID) == "") {
-		return p, fmt.Errorf("platform and URL or remote ID are required")
+		return p, "", fmt.Errorf("platform and URL or remote ID are required")
 	}
 	p.Platform = strings.TrimSpace(p.Platform)
 	p.URL = strings.TrimSpace(p.URL)
 	if p.URL != "" {
 		parsed, parseErr := url.ParseRequestURI(p.URL)
 		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return p, fmt.Errorf("URL must be an absolute http or https URL")
+			return p, "", fmt.Errorf("URL must be an absolute http or https URL")
 		}
 	}
 	if p.AccountID != "" {
 		account, accountErr := s.GetAccount(ctx, p.AccountID)
 		if accountErr != nil {
-			return p, accountErr
+			return p, "", accountErr
 		}
-		if account.ProfileID != topic.ProfileID {
-			return p, fmt.Errorf("external post account must belong to the topic profile")
+		belongs, membershipErr := s.AccountBelongsToTopic(ctx, topic.ID, p.AccountID)
+		if membershipErr != nil {
+			return p, "", membershipErr
+		}
+		if !belongs {
+			return p, "", fmt.Errorf("external post account must belong to the topic profile")
 		}
 		if account.Platform != p.Platform {
-			return p, fmt.Errorf("external post platform must match the selected account")
+			return p, "", fmt.Errorf("external post platform must match the selected account")
 		}
 	}
 	if p.ID == "" {
@@ -1323,10 +1803,49 @@ func (s *Store) CreateExternalPost(ctx context.Context, p ExternalPost) (Externa
 	}
 	mediaJSON, marshalErr := json.Marshal(p.MediaSnapshot)
 	if marshalErr != nil {
-		return p, marshalErr
+		return p, "", marshalErr
 	}
-	_, e = s.DB.ExecContext(ctx, `INSERT INTO external_posts(id,topic_id,account_id,platform,remote_id,url,text_snapshot,media_snapshot,captured_by,incomplete,incomplete_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.TopicID, nullString(p.AccountID), p.Platform, p.RemoteID, p.URL, p.TextSnapshot, string(mediaJSON), p.CapturedBy, boolInt(p.Incomplete), p.IncompleteReason, p.CreatedAt.Format(time.RFC3339Nano))
-	return p, e
+	return p, string(mediaJSON), nil
+}
+
+func insertExternalPost(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, p ExternalPost, mediaJSON string) error {
+	_, err := exec.ExecContext(ctx, `INSERT INTO external_posts(id,topic_id,account_id,platform,remote_id,url,text_snapshot,media_snapshot,captured_by,incomplete,incomplete_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.TopicID, nullString(p.AccountID), p.Platform, p.RemoteID, p.URL, p.TextSnapshot, mediaJSON, p.CapturedBy, boolInt(p.Incomplete), p.IncompleteReason, p.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+// CreateExternalPostAndBridgeRequest atomically stores a captured snapshot and
+// advances the existing pending bridge request. It deliberately cannot create
+// a missing request through upsert.
+func (s *Store) CreateExternalPostAndBridgeRequest(ctx context.Context, p ExternalPost, request BridgeRequestRecord) (ExternalPost, error) {
+	if request.ID == "" || request.Status != "captured" || len(request.Payload) == 0 {
+		return p, errors.New("complete captured bridge request data is required")
+	}
+	p, mediaJSON, err := s.prepareExternalPost(ctx, p)
+	if err != nil {
+		return p, err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return p, err
+	}
+	defer tx.Rollback()
+	if err = insertExternalPost(ctx, tx, p, mediaJSON); err != nil {
+		return p, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE bridge_requests SET status=?,expires_at=?,payload=? WHERE id=? AND pairing_id=? AND status='pending'`, request.Status, formatTime(request.ExpiresAt), string(request.Payload), request.ID, request.PairingID)
+	if err != nil {
+		return p, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return p, err
+	}
+	if affected != 1 {
+		return p, fmt.Errorf("%w: bridge capture request is missing or no longer pending", ErrConflict)
+	}
+	return p, tx.Commit()
 }
 func nullString(v string) any {
 	if v == "" {
@@ -1444,7 +1963,11 @@ func (s *Store) CreateTranslatedVariant(ctx context.Context, source Variant, tar
 	if source.TopicID == "" || target.ID == "" || strings.TrimSpace(targetLanguage) == "" {
 		return Variant{}, Translation{}, fmt.Errorf("source, target account and target language are required")
 	}
-	if !s.accountTopicOK(ctx, source.TopicID, target.ID) {
+	belongs, err := s.AccountBelongsToTopic(ctx, source.TopicID, target.ID)
+	if err != nil {
+		return Variant{}, Translation{}, err
+	}
+	if !belongs {
 		return Variant{}, Translation{}, ErrNotFound
 	}
 	created := time.Now().UTC()

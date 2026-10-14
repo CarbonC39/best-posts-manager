@@ -34,7 +34,7 @@ func (s *Service) ConfirmPublication(ctx context.Context, publicationID, remoteU
 	if err != nil {
 		return app.Publication{}, err
 	}
-	if p.Status != "needs_confirmation" {
+	if p.Status != app.PublicationNeedsConfirmation {
 		return p, fmt.Errorf("%w: only publications needing confirmation can be confirmed", app.ErrConflict)
 	}
 	return s.Store.ConfirmPublication(ctx, publicationID, remoteURL, strings.TrimSpace(remoteID), time.Now().UTC())
@@ -45,7 +45,7 @@ func (s *Service) CancelPublication(ctx context.Context, publicationID string) (
 	if err != nil {
 		return app.Publication{}, err
 	}
-	if p.Status != "needs_confirmation" {
+	if p.Status != app.PublicationNeedsConfirmation {
 		return p, fmt.Errorf("%w: only publications needing confirmation can be cancelled", app.ErrConflict)
 	}
 	return s.Store.CancelPublication(ctx, publicationID)
@@ -231,11 +231,11 @@ func (s *Service) Translate(ctx context.Context, req TranslationRequest) (app.Va
 	if target.Disabled {
 		return app.Variant{}, app.Translation{}, errors.New("translation target account is deactivated")
 	}
-	sourceAccount, err := s.Store.GetAccount(ctx, source.AccountID)
+	belongs, err := s.Store.AccountBelongsToTopic(ctx, source.TopicID, target.ID)
 	if err != nil {
 		return app.Variant{}, app.Translation{}, err
 	}
-	if sourceAccount.ProfileID != target.ProfileID {
+	if !belongs {
 		return app.Variant{}, app.Translation{}, errors.New("translation target account must belong to the source profile")
 	}
 	config, err := s.Store.GetTranslationConfig(ctx, req.ConfigID)
@@ -279,13 +279,17 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 	if account.Disabled {
 		return app.Publication{}, errors.New("account is deactivated; restore or add an active account before publishing")
 	}
-	p, e := s.Store.CreatePublication(ctx, app.Publication{VariantID: v.ID, AccountID: account.ID, Status: "publishing", Source: "internal"})
+	p, e := s.Store.CreatePublication(ctx, app.Publication{VariantID: v.ID, AccountID: account.ID, Status: app.PublicationPublishing, Source: "internal"})
 	if e != nil {
 		return p, e
 	}
-	media, e := s.Store.ListMedia(ctx, v.TopicID)
+	return s.executePublication(ctx, p, v, account)
+}
+
+func (s *Service) executePublication(ctx context.Context, p app.Publication, v app.Variant, account app.Account) (app.Publication, error) {
+	media, e := s.Store.ListMediaForVariant(ctx, v.TopicID, v.ID)
 	if e != nil {
-		p.Status = "failed"
+		p.Status = app.PublicationFailed
 		p.ErrorCategory = "storage"
 		p.ErrorMessage = e.Error()
 		_ = s.Store.UpdatePublication(ctx, p)
@@ -293,16 +297,9 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 	}
 	var selected []app.Media
 	for _, m := range media {
-		if (m.VariantID == "" || m.VariantID == v.ID) && !m.CreatedAt.After(p.CreatedAt) {
+		if !m.CreatedAt.After(p.CreatedAt) {
 			selected = append(selected, m)
 		}
-	}
-	if account.Platform != "mastodon" && account.Platform != "mastodon-compatible" && account.Platform != "misskey" && account.Platform != "bluesky" {
-		p.Status = "failed"
-		p.ErrorCategory = "config"
-		p.ErrorMessage = "unsupported platform"
-		_ = s.Store.UpdatePublication(ctx, p)
-		return p, &platform.Error{Category: "config", Err: errUnsupported{account.Platform}}
 	}
 	var result platform.Result
 	switch account.Platform {
@@ -316,12 +313,12 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 		e = &platform.Error{Category: "config", Stage: "validate", Err: errors.New("unsupported platform")}
 	}
 	if e != nil {
-		p.Status = "failed"
+		p.Status = app.PublicationFailed
 		if pe, ok := e.(*platform.Error); ok {
 			p.ErrorCategory = pe.Category
 			p.ErrorMessage = publicationErrorMessage(pe)
 			if pe.OutcomeUnknown {
-				p.Status = "needs_confirmation"
+				p.Status = app.PublicationNeedsConfirmation
 			} else if pe.Retryable || (pe.Category == "network" && pe.Stage == "media") {
 				p.ErrorCategory = "retryable"
 			}
@@ -332,7 +329,7 @@ func (s *Service) Publish(ctx context.Context, variantID string) (app.Publicatio
 		_ = s.Store.UpdatePublication(ctx, p)
 		return p, e
 	}
-	p.Status = "published"
+	p.Status = app.PublicationPublished
 	p.RemoteID, p.RemoteURL, p.RemoteCID = result.ID, result.URL, result.CID
 	p.PublishedAt = time.Now().UTC()
 	if e = s.Store.UpdatePublication(ctx, p); e != nil {
@@ -387,7 +384,11 @@ func (s *Service) ImportExternal(ctx context.Context, topicID, accountID, refere
 	if err != nil {
 		return app.ExternalPost{}, err
 	}
-	if topic.ProfileID != a.ProfileID {
+	belongs, err := s.Store.AccountBelongsToTopic(ctx, topic.ID, a.ID)
+	if err != nil {
+		return app.ExternalPost{}, err
+	}
+	if !belongs {
 		return app.ExternalPost{}, errors.New("external post account must belong to the topic profile")
 	}
 	var post app.ExternalPost
@@ -413,7 +414,7 @@ func (s *Service) Retry(ctx context.Context, publicationID string) (app.Publicat
 	if err != nil {
 		return p, err
 	}
-	if p.Status != "failed" || p.ErrorCategory != "retryable" {
+	if p.Status != app.PublicationFailed || p.ErrorCategory != "retryable" {
 		return p, errors.New("only failed retryable publications can be retried")
 	}
 	v, err := s.Store.GetVariant(ctx, p.VariantID)
@@ -427,64 +428,14 @@ func (s *Service) Retry(ctx context.Context, publicationID string) (app.Publicat
 	if account.Disabled {
 		return p, errors.New("account is deactivated; add an active account before retrying")
 	}
-	p.Status = "publishing"
+	p.Status = app.PublicationPublishing
 	p.ErrorCategory = ""
 	p.ErrorMessage = ""
 	if err = s.Store.UpdatePublication(ctx, p); err != nil {
 		return p, err
 	}
-	media, err := s.Store.ListMedia(ctx, v.TopicID)
-	if err != nil {
-		p.Status = "failed"
-		p.ErrorCategory = "storage"
-		p.ErrorMessage = err.Error()
-		_ = s.Store.UpdatePublication(ctx, p)
-		return p, err
-	}
-	var selected []app.Media
-	for _, m := range media {
-		if (m.VariantID == "" || m.VariantID == v.ID) && !m.CreatedAt.After(p.CreatedAt) {
-			selected = append(selected, m)
-		}
-	}
-	var result platform.Result
-	switch account.Platform {
-	case "mastodon", "mastodon-compatible":
-		result, err = s.Mastodon.Publish(ctx, account, v, selected, p.IdempotencyKey)
-	case "misskey":
-		result, err = s.Misskey.Publish(ctx, account, v, selected)
-	case "bluesky":
-		result, err = s.Bluesky.Publish(ctx, account, v, selected)
-	default:
-		err = &platform.Error{Category: "config", Stage: "validate", Err: errors.New("unsupported platform")}
-	}
-	if err != nil {
-		p.Status = "failed"
-		if pe, ok := err.(*platform.Error); ok {
-			p.ErrorCategory = pe.Category
-			p.ErrorMessage = publicationErrorMessage(pe)
-			if pe.OutcomeUnknown {
-				p.Status = "needs_confirmation"
-			} else if pe.Retryable || (pe.Category == "network" && pe.Stage == "media") {
-				p.ErrorCategory = "retryable"
-			}
-		} else {
-			p.ErrorCategory = "unknown"
-			p.ErrorMessage = err.Error()
-		}
-		_ = s.Store.UpdatePublication(ctx, p)
-		return p, err
-	}
-	p.Status = "published"
-	p.RemoteID, p.RemoteURL, p.RemoteCID = result.ID, result.URL, result.CID
-	p.PublishedAt = time.Now().UTC()
-	err = s.Store.UpdatePublication(ctx, p)
-	return p, err
+	return s.executePublication(ctx, p, v, account)
 }
-
-type errUnsupported struct{ p string }
-
-func (e errUnsupported) Error() string { return "unsupported platform: " + e.p }
 
 func publicationErrorMessage(pe *platform.Error) string {
 	stage := map[string]string{

@@ -50,6 +50,13 @@ func TestJSONCoreChain(t *testing.T) {
 	if a.ProfileID != p.ID || a.CredentialRef != "" {
 		t.Fatalf("account profile_id lost: %+v", a)
 	}
+	var second app.Profile
+	post("/api/profiles", map[string]any{"name": "second"}, &second)
+	var attached app.Account
+	post("/api/profile-accounts", map[string]any{"profile_id": second.ID, "account_id": a.ID}, &attached)
+	if len(attached.ProfileIDs) != 2 || attached.ID != a.ID {
+		t.Fatalf("account was not shared across profiles: %+v", attached)
+	}
 	var topic app.Topic
 	post("/api/topics", map[string]any{"profile_id": p.ID, "title": "topic"}, &topic)
 	if topic.ProfileID != p.ID {
@@ -447,6 +454,86 @@ func TestEmptyListResponsesAreJSONArrays(t *testing.T) {
 		if res.StatusCode != http.StatusOK || decodeErr != nil || value == nil {
 			t.Errorf("%s: status=%d value=%#v decode=%v", path, res.StatusCode, value, decodeErr)
 		}
+	}
+}
+
+func TestPublicationEndpointsAreProfileScoped(t *testing.T) {
+	ctx := context.Background()
+	store, err := app.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	createPublication := func(name, status string) (app.Profile, app.Publication) {
+		profile, createErr := store.CreateProfile(ctx, app.Profile{Name: name})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		account, _ := store.CreateAccount(ctx, app.Account{ProfileID: profile.ID, Platform: "mastodon", Name: name})
+		topic, _ := store.CreateTopic(ctx, app.Topic{ProfileID: profile.ID, Title: name})
+		variant, _ := store.CreateVariant(ctx, app.Variant{TopicID: topic.ID, AccountID: account.ID}, "")
+		publication, createErr := store.CreatePublication(ctx, app.Publication{VariantID: variant.ID, AccountID: account.ID, Status: status})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return profile, publication
+	}
+	first, firstPublication := createPublication("first", app.PublicationNeedsConfirmation)
+	second, _ := createPublication("second", app.PublicationFailed)
+	server := httptest.NewServer(&Server{Svc: service.New(store)})
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/publications?profile_id=" + first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []app.PublicationSummary
+	decodeErr := json.NewDecoder(res.Body).Decode(&rows)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || decodeErr != nil || len(rows) != 1 || rows[0].ID != firstPublication.ID {
+		t.Fatalf("scoped list status=%d rows=%+v decode=%v", res.StatusCode, rows, decodeErr)
+	}
+
+	res, err = http.Get(server.URL + "/api/publications")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows = nil
+	decodeErr = json.NewDecoder(res.Body).Decode(&rows)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || decodeErr != nil || len(rows) != 2 {
+		t.Fatalf("compatible unscoped list status=%d rows=%+v decode=%v", res.StatusCode, rows, decodeErr)
+	}
+
+	res, err = http.Get(server.URL + "/api/publications/summary?profile_id=" + second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary app.PublicationStatusSummary
+	decodeErr = json.NewDecoder(res.Body).Decode(&summary)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || decodeErr != nil || summary.ActionCount != 1 || summary.FailedCount != 1 {
+		t.Fatalf("summary status=%d body=%+v decode=%v", res.StatusCode, summary, decodeErr)
+	}
+
+	res, err = http.Get(server.URL + "/api/publications/summary?profile_id=missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary = app.PublicationStatusSummary{}
+	decodeErr = json.NewDecoder(res.Body).Decode(&summary)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || decodeErr != nil || summary.ActionCount != 0 || summary.FailedCount != 0 {
+		t.Fatalf("unknown summary status=%d body=%+v decode=%v", res.StatusCode, summary, decodeErr)
+	}
+
+	res, err = http.Get(server.URL + "/api/publications/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing profile summary status=%d", res.StatusCode)
 	}
 }
 
