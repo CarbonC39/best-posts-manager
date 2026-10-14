@@ -178,12 +178,16 @@ func serve(svc *service.Service, args []string) {
 	if err != nil {
 		fatal(fmt.Errorf("embedded userscript: %w", err))
 	}
-	log.Printf("startup address=http://%s http_request_log=%s", *addr, enabledLabel(*httpLog))
 	webHandler, err := newWebHandler(static)
 	if err != nil {
 		fatal(fmt.Errorf("embedded web index: %w", err))
 	}
-	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: webHandler, UserScript: userScript, Bridge: bridge.NewManager(svc.Store), Connections: connection.NewManager(svc.Store, svc.Credentials), LogRequests: *httpLog}); e != nil {
+	bridgeManager, err := bridge.NewManager(svc.Store)
+	if err != nil {
+		fatal(fmt.Errorf("initialize browser bridge: %w", err))
+	}
+	log.Printf("startup address=http://%s http_request_log=%s", *addr, enabledLabel(*httpLog))
+	if e := http.ListenAndServe(*addr, &httpapi.Server{Svc: svc, Static: webHandler, UserScript: userScript, Bridge: bridgeManager, Connections: connection.NewManager(svc.Store, svc.Credentials), LogRequests: *httpLog}); e != nil {
 		fatal(e)
 	}
 }

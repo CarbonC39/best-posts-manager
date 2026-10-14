@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Best Post Manager local bridge
 // @namespace    best-post-manager
-// @version      1.4.0
-// @description  Fill visible editors, safely publish X on explicit request, and capture visible posts.
+// @version      1.6.1
+// @description  Fill visible editors, safely publish X or Weibo on explicit request, and capture visible posts.
 // @match        https://x.com/*
 // @match        https://*.x.com/*
 // @match        https://twitter.com/*
@@ -11,6 +11,8 @@
 // @match        https://*.weibo.com/*
 // @match        https://xiaohongshu.com/*
 // @match        https://*.xiaohongshu.com/*
+// @match        https://rednote.com/*
+// @match        https://*.rednote.com/*
 // @match        https://qzone.qq.com/*
 // @match        https://*.qzone.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -24,22 +26,108 @@
 // ==/UserScript==
 (function() {
   "use strict";
+  const platformRegistry = {
+    mastodon: {
+      label: "Mastodon",
+      accountSetupMode: "oauth",
+      setupDescription: "Mastodon：推荐 OAuth 自动连接；也可手动保存 access token，或使用环境变量。"
+    },
+    "mastodon-compatible": {
+      label: "Mastodon",
+      accountSetupMode: "credential",
+      setupDescription: "Mastodon：推荐 OAuth 自动连接；也可手动保存 access token，或使用环境变量。"
+    },
+    misskey: {
+      label: "Misskey",
+      accountSetupMode: "miauth",
+      setupDescription: "Misskey：推荐 MiAuth 自动连接；也可手动保存 access token，或使用环境变量。"
+    },
+    bluesky: {
+      label: "Bluesky",
+      accountSetupMode: "credential",
+      setupDescription: "Bluesky：填写 handle/identifier、PDS（默认 https://bsky.social）与 app password。app password 可直接保存在本机凭据文件，也可使用环境变量。"
+    },
+    x: {
+      label: "X",
+      accountSetupMode: "bridge",
+      setupDescription: "X：使用浏览器桥接；默认只填入，纯文本可对单次请求确认自动发布。",
+      bridge: {
+        hosts: ["x.com", "twitter.com"],
+        matches: ["https://x.com/*", "https://*.x.com/*", "https://twitter.com/*", "https://*.twitter.com/*"],
+        clientAutoPublish: "text-only"
+      }
+    },
+    weibo: {
+      label: "微博",
+      accountSetupMode: "bridge",
+      setupDescription: "微博：使用浏览器桥接填入；纯文本可在最终确认时选择自动发布，带图片仍需人工确认。",
+      bridge: {
+        hosts: ["weibo.com"],
+        matches: ["https://weibo.com/*", "https://*.weibo.com/*"],
+        clientAutoPublish: "text-only"
+      }
+    },
+    xiaohongshu: {
+      label: "小红书",
+      accountSetupMode: "bridge",
+      setupDescription: "小红书：使用浏览器桥接填入；发布按钮选择器尚未安全验收，因此最终发布保持人工操作。",
+      bridge: {
+        hosts: ["xiaohongshu.com", "rednote.com"],
+        matches: ["https://xiaohongshu.com/*", "https://*.xiaohongshu.com/*", "https://rednote.com/*", "https://*.rednote.com/*"],
+        clientAutoPublish: "none"
+      }
+    },
+    qzone: {
+      label: "QQ 空间",
+      accountSetupMode: "bridge",
+      setupDescription: "QQ空间：使用浏览器桥接填入；可见范围、发布和图片顺序仍需人工检查。",
+      bridge: {
+        hosts: ["qzone.qq.com"],
+        matches: ["https://qzone.qq.com/*", "https://*.qzone.qq.com/*"],
+        clientAutoPublish: "none"
+      }
+    }
+  };
+  const platformIDs = Object.keys(platformRegistry);
+  const bridgePlatformIDs = platformIDs.filter((platform2) => "bridge" in platformRegistry[platform2]);
+  bridgePlatformIDs.flatMap((platform2) => platformRegistry[platform2].bridge.matches);
+  function platformForBridgeHost(hostname) {
+    const host2 = hostname.toLowerCase();
+    return bridgePlatformIDs.find((platform2) => platformRegistry[platform2].bridge.hosts.some((domain) => host2 === domain || host2.endsWith(`.${domain}`))) || null;
+  }
   const adapters = {
     x: { selectors: ['[data-testid="tweetTextarea_0"]', 'textarea[aria-label*="Post"]'], captureSelectors: ['article [data-testid="tweetText"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'] },
-    weibo: { selectors: ['textarea[placeholder*="分享"]', '[contenteditable="true"][node-type*="text"]'], captureSelectors: [".WB_text", '[node-type="feed_list_content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: [] },
-    xiaohongshu: { selectors: ['.ql-editor[contenteditable="true"]', 'textarea[placeholder*="正文"]'], captureSelectors: [".note-content", '[class*="note-content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: [] },
-    qzone: { selectors: ['textarea[placeholder*="说说"]', '[contenteditable="true"][class*="textinput"]'], captureSelectors: [".feed-content", '[class*="feed-content"]'], mediaSelectors: ['input[type="file"]'], publishSelectors: [] }
+    weibo: { selectors: ['textarea[placeholder="有什么新鲜事想分享给大家？"]', 'textarea[placeholder*="分享"]', '[contenteditable="true"][node-type*="text"]'], captureSelectors: [".WB_text", '[node-type="feed_list_content"]'], mediaSelectors: ['.wbpro-form input[type="file"]', 'input[type="file"]'], publishSelectors: [".wbpro-form button", '.wbpro-form [role="button"]'], publishLabels: ["发送", "发布"] },
+    xiaohongshu: { selectors: ['.ql-editor[contenteditable="true"]', '[contenteditable="true"][data-placeholder*="正文"]', 'textarea[placeholder*="正文"]', 'textarea[placeholder*="描述"]'], captureSelectors: [".note-content", '[class*="note-content"]'], mediaSelectors: ['.image-upload-buttons input[type="file"]', 'input[type="file"]'], publishSelectors: [] },
+    qzone: { selectors: ['.qz-poster-editor-cont [x\\:id="content_content"]', '.qz-poster-editor-cont [contenteditable="true"][class~="textinput"]', 'textarea[placeholder*="说说"]'], captureSelectors: [".feed-content", '[class*="feed-content"]'], mediaSelectors: ['.qz-poster-editor-cont input[type="file"]', 'input[type="file"]'], publishSelectors: [] }
   };
   function adapter(platform2) {
     const value = adapters[platform2];
     if (!value) throw new Error(`unsupported bridge platform: ${platform2}`);
     return value;
   }
-  function composer(platform2, root = document) {
+  function findComposer(platform2, root = document) {
     for (const selector of adapter(platform2).selectors) {
-      const found = root.querySelector(selector);
-      if (found && !found.hidden && found.getAttribute("aria-hidden") !== "true" && found.style.display !== "none") return found;
+      const candidates = root.querySelectorAll(selector);
+      for (const found of candidates) {
+        if (!found.hidden && found.getAttribute("aria-hidden") !== "true" && found.style.display !== "none") return found;
+      }
     }
+    return null;
+  }
+  function composer(platform2, root = document) {
+    if (platform2 === "qzone") {
+      const container = root.querySelector(".qz-poster-editor-cont");
+      const content = container == null ? void 0 : container.querySelector('[x\\:id="content_content"]');
+      if (content) {
+        const substitutor = container == null ? void 0 : container.querySelector('[x\\:id="substitutor_content"]');
+        if (substitutor && !substitutor.hidden && substitutor.getAttribute("aria-hidden") !== "true" && substitutor.style.display !== "none") substitutor.click();
+        content.focus();
+        return content;
+      }
+    }
+    const found = findComposer(platform2, root);
+    if (found) return found;
     throw new Error("当前页面未找到可见编辑框，请展开编辑器后重试");
   }
   function setText(element2, text) {
@@ -54,21 +142,96 @@
     element2.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
     element2.dispatchEvent(new Event("change", { bubbles: true }));
   }
+  function setQzoneText(element2, text) {
+    var _a;
+    element2.focus();
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element2);
+    selection == null ? void 0 : selection.removeAllRanges();
+    selection == null ? void 0 : selection.addRange(range);
+    element2.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
+    const editableDocument = document;
+    let inserted = false;
+    try {
+      inserted = ((_a = editableDocument.execCommand) == null ? void 0 : _a.call(editableDocument, "insertText", false, text)) === true;
+    } catch {
+    }
+    if (!inserted) {
+      range.deleteContents();
+      const node = document.createTextNode(text);
+      range.insertNode(node);
+      range.setStartAfter(node);
+      range.collapse(true);
+      selection == null ? void 0 : selection.removeAllRanges();
+      selection == null ? void 0 : selection.addRange(range);
+    }
+    element2.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+    element2.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   function fillVisible(platform2, text) {
     const element2 = composer(platform2);
-    setText(element2, text);
-    const mediaInput = document.querySelector(adapter(platform2).mediaSelectors[0]);
-    return mediaInput ? { mediaInput } : {};
+    if (platform2 === "qzone" && !(element2 instanceof HTMLTextAreaElement)) setQzoneText(element2, text);
+    else setText(element2, text);
+    for (const selector of adapter(platform2).mediaSelectors) {
+      const mediaInput = document.querySelector(selector);
+      if (mediaInput) return { mediaInput };
+    }
+    return {};
+  }
+  function visibleElement(selectors) {
+    for (const selector of selectors) {
+      for (const element2 of document.querySelectorAll(selector)) {
+        if (!element2.hidden && element2.getAttribute("aria-hidden") !== "true" && element2.style.display !== "none") return element2;
+      }
+    }
+    return null;
+  }
+  const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  async function waitForVisible(selectors, timeout = 4e3) {
+    const deadline = Date.now() + timeout;
+    let found = visibleElement(selectors);
+    while (!found && Date.now() < deadline) {
+      await wait(100);
+      found = visibleElement(selectors);
+    }
+    return found;
+  }
+  async function prepareXiaohongshuComposer(hasMedia) {
+    const creatorTab = visibleElement([".creator-tab"]);
+    const modeSelectors = hasMedia ? [".image-upload-buttons .upload-button"] : [".image-upload-buttons .text2image-button"];
+    const initialModeButton = visibleElement(modeSelectors);
+    if (!creatorTab && !initialModeButton && findComposer("xiaohongshu")) return;
+    if (creatorTab) {
+      creatorTab.click();
+    }
+    const modeButton = creatorTab ? await waitForVisible(modeSelectors) : initialModeButton;
+    if (modeButton) {
+      modeButton.click();
+      const deadline = Date.now() + 4e3;
+      while (!findComposer("xiaohongshu") && Date.now() < deadline) await wait(100);
+    }
   }
   function clickKnownPublish(platform2) {
     var _a;
     const viable = /* @__PURE__ */ new Set();
+    const labels = adapter(platform2).publishLabels;
     for (const selector of adapter(platform2).publishSelectors) {
       const candidates = document.querySelectorAll(selector);
       for (const element2 of candidates) {
-        if (element2.hidden || element2.getAttribute("aria-hidden") === "true" || element2.getAttribute("aria-disabled") === "true" || element2.disabled) continue;
-        const style = getComputedStyle(element2);
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+        if (element2.getAttribute("aria-disabled") === "true" || element2.disabled) continue;
+        let current2 = element2;
+        let hidden = false;
+        while (current2) {
+          const style = getComputedStyle(current2);
+          if (current2.hidden || current2.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+            hidden = true;
+            break;
+          }
+          current2 = current2.parentElement;
+        }
+        if (hidden) continue;
+        if (labels && !labels.includes((element2.innerText || element2.textContent || "").trim())) continue;
         viable.add(element2);
       }
     }
@@ -78,10 +241,11 @@
     return null;
   }
   async function fillVisibleWithMedia(platform2, request, fetcher = fetch) {
-    var _a;
+    var _a, _b;
+    if (platform2 === "xiaohongshu") await prepareXiaohongshuComposer(Boolean((_a = request.media) == null ? void 0 : _a.length));
     const { mediaInput } = fillVisible(platform2, request.text || "");
     const failures = [];
-    if (!((_a = request.media) == null ? void 0 : _a.length)) return failures;
+    if (!((_b = request.media) == null ? void 0 : _b.length)) return failures;
     if (!mediaInput) return request.media.map((media) => `${media.filename}: 页面没有图片输入框`);
     const files = [];
     for (const media of request.media) {
@@ -134,8 +298,9 @@
     const incomplete = !text;
     return { text, url: pageURL, media, incomplete, incomplete_reason: incomplete ? "当前页面没有可见正文" : void 0 };
   }
+  [...bridgePlatformIDs];
   const host = location.hostname.toLowerCase();
-  const platform = host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com") ? "x" : host === "weibo.com" || host.endsWith(".weibo.com") ? "weibo" : host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com") ? "xiaohongshu" : "qzone";
+  const platform = platformForBridgeHost(host) || "qzone";
   const configKey = `bpm-bridge-config-v1-${platform}`;
   const saved = GM_getValue(configKey, {});
   const injectedOrigin = "__BPM_ORIGIN__";
@@ -169,33 +334,116 @@
     return { ok: response.status >= 200 && response.status < 300, status: response.status, blob: async () => response.response };
   }
   const panel = document.createElement("div");
-  panel.style.cssText = "position:fixed;z-index:2147483647;right:12px;bottom:12px;background:#fff;color:#111;border:1px solid #888;padding:10px;font:13px sans-serif;width:280px;box-shadow:0 2px 8px #0003";
-  panel.innerHTML = '<style>div{line-height:1.45}input{box-sizing:border-box;width:100%;margin:5px 0;padding:6px;border:1px solid #ccc;border-radius:4px}button{margin:5px 5px 5px 0;padding:5px 8px;border:1px solid #ccc;border-radius:4px;background:#f7f7f5;cursor:pointer}[data-bpm=status]{margin:6px 0;color:#4b6f55;overflow-wrap:anywhere}[data-bpm=request]{margin-top:6px;padding-top:6px;border-top:1px solid #eee}</style><b>Best Post Manager bridge v1</b><button data-bpm="minimize">缩小</button><div data-bpm="platform"></div><div data-bpm="status">未连接</div><input data-bpm="base" placeholder="本地服务地址"><input data-bpm="code" placeholder="一次性 pairing code"><button data-bpm="connect">连接</button><button data-bpm="disconnect">断开并清除</button><div data-bpm="request"></div>';
+  panel.style.cssText = 'position:fixed;z-index:2147483647;right:16px;bottom:16px;width:304px;color:#20241f;font:13px Inter,"Segoe UI",system-ui,sans-serif;line-height:1.45';
+  panel.innerHTML = `<style>
+  *{box-sizing:border-box}button,input{font:inherit}button{cursor:pointer}
+  .bpm-shell{overflow:hidden;border:1px solid #d2d8d1;border-radius:14px;background:#fff;box-shadow:0 16px 44px rgb(24 38 29 / 18%)}
+  .bpm-head{display:flex;align-items:center;gap:10px;min-height:48px;padding:8px 9px 8px 11px;background:#f7f8f6;cursor:grab;user-select:none;touch-action:none}
+  .bpm-head:active{cursor:grabbing}.bpm-mark{display:grid;place-items:center;flex:0 0 30px;width:30px;height:30px;border-radius:9px;color:#fff;background:#264e36}.bpm-mark svg{width:17px;height:17px}
+  .bpm-title{display:grid;min-width:0;line-height:1.15}.bpm-title strong{font-size:13px}.bpm-title small{margin-top:3px;color:#737c75;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+  .bpm-icon{display:grid;place-items:center;width:30px;height:30px;margin-left:auto;padding:0;border:0;border-radius:7px;color:#607068;background:transparent;font-size:20px;line-height:1}.bpm-icon:hover{color:#173625;background:#e8f1eb}
+  .bpm-content{display:grid;gap:11px;max-height:min(520px,calc(100vh - 92px));padding:12px;overflow:auto}
+  .bpm-status{display:flex;align-items:flex-start;gap:8px;color:#496452;font-size:12px;overflow-wrap:anywhere}.bpm-dot{flex:0 0 7px;width:7px;height:7px;margin-top:5px;border-radius:50%;background:#c68a48}.bpm-shell[data-connected="true"] .bpm-dot{background:#5da777}
+  label{display:grid;gap:5px;color:#3f4741;font-size:11px;font-weight:650}input{width:100%;height:36px;padding:0 9px;border:1px solid #c8d0c9;border-radius:7px;color:#20241f;background:#fff;font-weight:400;outline:0}input::placeholder{color:#707970}input:focus{border-color:#76a088;box-shadow:0 0 0 3px rgb(93 167 119 / 15%)}
+  .bpm-actions{display:flex;align-items:center;gap:7px}.bpm-button{min-height:34px;padding:6px 10px;border:1px solid #c8d0c9;border-radius:7px;color:#405047;background:#fff}.bpm-button:hover{background:#f3f6f3}.bpm-button.primary{border-color:#264e36;color:#fff;background:#264e36}.bpm-button.primary:hover{background:#1e3f2c}
+  [data-bpm=request]{display:grid;gap:8px;padding-top:10px;border-top:1px solid #e2e6e0;color:#3f4741;font-size:12px}[data-bpm=request]:empty{display:none}[data-bpm=request] button{justify-self:start;min-height:34px;padding:6px 10px;border:1px solid #c8d0c9;border-radius:7px;color:#315840;background:#fff}[data-bpm=request] input{margin-top:2px}
+  .bpm-shell.minimized{width:52px;height:52px;border-radius:50%;border-color:#b9c9be;box-shadow:0 10px 26px rgb(24 38 29 / 22%)}.bpm-shell.minimized .bpm-head{width:52px;height:52px;min-height:52px;padding:0;justify-content:center;background:#264e36;cursor:grab}.bpm-shell.minimized .bpm-mark{width:52px;height:52px;border-radius:50%;background:transparent}.bpm-shell.minimized .bpm-mark svg{width:20px;height:20px}.bpm-shell.minimized .bpm-title,.bpm-shell.minimized .bpm-icon,.bpm-shell.minimized .bpm-content{display:none}
+</style><section class="bpm-shell" data-bpm="shell"><header class="bpm-head" data-bpm="drag"><span class="bpm-mark" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M4 16 16 4M7 4h9v9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></span><span class="bpm-title"><strong>Best Post Manager</strong><small>Bridge · ${platform}</small></span><button type="button" class="bpm-icon" data-bpm="minimize" aria-label="最小化桥接面板" title="最小化">−</button></header><div class="bpm-content" data-bpm="content"><div class="bpm-status"><span class="bpm-dot" aria-hidden="true"></span><span data-bpm="status">未连接</span></div><label>本地服务<input data-bpm="base" placeholder="http://127.0.0.1:8787"></label><label>配对 code<input data-bpm="code" placeholder="一次性 code"></label><div class="bpm-actions"><button type="button" class="bpm-button primary" data-bpm="connect">连接</button><button type="button" class="bpm-button" data-bpm="disconnect">断开</button></div><div data-bpm="request"></div></div></section>`;
   const panelHost = document.createElement("div");
   panelHost.attachShadow({ mode: "closed" }).appendChild(panel);
   document.body.appendChild(panelHost);
   const element = (name) => panel.querySelector(`[data-bpm="${name}"]`);
-  element("platform").textContent = `当前平台：${platform}`;
   element("base").value = config.base;
+  const shell = element("shell");
   const status = (text) => {
     element("status").textContent = text;
+    shell.dataset.connected = String(Boolean(config.token && config.pairing));
   };
   const requestBox = element("request");
   let minimized = GM_getValue(`${configKey}-minimized`, false);
+  const positionKey = `${configKey}-position`;
+  const savedPosition = GM_getValue(positionKey, {});
+  if (Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.left = `${savedPosition.left}px`;
+    panel.style.top = `${savedPosition.top}px`;
+  }
+  function clampPanel(left, top) {
+    const rect = panel.getBoundingClientRect();
+    return { left: Math.max(8, Math.min(left, window.innerWidth - rect.width - 8)), top: Math.max(8, Math.min(top, window.innerHeight - rect.height - 8)) };
+  }
+  function setPanelPosition(left, top, save = false) {
+    const position = clampPanel(left, top);
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.left = `${position.left}px`;
+    panel.style.top = `${position.top}px`;
+    if (save) GM_setValue(positionKey, position);
+  }
   function setMinimized(value) {
+    const before = panel.getBoundingClientRect();
     minimized = value;
     GM_setValue(`${configKey}-minimized`, value);
-    panel.style.width = value ? "46px" : "280px";
-    panel.style.height = value ? "46px" : "auto";
-    panel.style.padding = value ? "0" : "10px";
-    for (const name of ["platform", "status", "base", "code", "connect", "disconnect", "request"]) element(name).style.display = value ? "none" : "";
-    const button = element("minimize");
-    button.textContent = value ? "BPM" : "最小化";
-    button.title = value ? "展开 Best Post Manager bridge" : "最小化 bridge";
-    button.style.margin = value ? "0" : "5px";
-    button.style.width = value ? "46px" : "auto";
-    button.style.height = value ? "46px" : "auto";
+    shell.classList.toggle("minimized", value);
+    panel.style.width = value ? "52px" : "304px";
+    const dragHandle = element("drag");
+    if (value) {
+      dragHandle.setAttribute("role", "button");
+      dragHandle.setAttribute("tabindex", "0");
+      dragHandle.setAttribute("aria-label", "展开桥接面板");
+    } else {
+      dragHandle.removeAttribute("role");
+      dragHandle.removeAttribute("tabindex");
+      dragHandle.removeAttribute("aria-label");
+    }
+    const after = panel.getBoundingClientRect();
+    if (panel.style.left) setPanelPosition(before.right - after.width, before.bottom - after.height, true);
   }
+  let dragged = false;
+  element("drag").addEventListener("pointerdown", (event) => {
+    if (event.target.closest('[data-bpm="minimize"]')) return;
+    const handle = event.currentTarget;
+    const start = panel.getBoundingClientRect();
+    const originX = event.clientX;
+    const originY = event.clientY;
+    dragged = false;
+    handle.setPointerCapture(event.pointerId);
+    const move = (next) => {
+      const dx = next.clientX - originX;
+      const dy = next.clientY - originY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) dragged = true;
+      setPanelPosition(start.left + dx, start.top + dy);
+    };
+    const up = (next) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      const rect = panel.getBoundingClientRect();
+      if (dragged) {
+        next.preventDefault();
+        GM_setValue(positionKey, { left: rect.left, top: rect.top });
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
+  element("drag").addEventListener("click", (event) => {
+    if (event.target.closest('[data-bpm="minimize"]')) return;
+    if (minimized && !dragged) setMinimized(false);
+    dragged = false;
+  });
+  element("drag").addEventListener("keydown", (event) => {
+    if (minimized && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      setMinimized(false);
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (panel.style.left) {
+      const rect = panel.getBoundingClientRect();
+      setPanelPosition(rect.left, rect.top, true);
+    }
+  });
   const addButton = (label, action) => {
     const button = document.createElement("button");
     button.textContent = label;
@@ -214,7 +462,7 @@
     config.pairing = hello.id;
     GM_setValue(configKey, { base: config.base, token: config.token, pairing: config.pairing });
     element("code").value = "";
-    status("已连接；token 仅保存在油猴隔离存储中（服务端 TTL 90 天）");
+    status("已连接");
     if (!polling) {
       polling = true;
       void poll();
@@ -298,7 +546,7 @@
     current = null;
     requestBox.replaceChildren();
     GM_setValue(configKey, { base: config.base });
-    status("已断开；脚本存储中的 token 已清除");
+    status("已断开");
   });
   element("minimize").addEventListener("click", () => setMinimized(!minimized));
   setMinimized(minimized);
